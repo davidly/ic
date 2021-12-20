@@ -3,6 +3,10 @@
 
 Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS data to the output image. The app also creates simple collages of images.
 
+To build on Windows:
+    
+    Using a Visual Studio x64 Native Tools Command Prompt window, run m.bat
+
 usage: ic input /o:output
     
     Image Convert
