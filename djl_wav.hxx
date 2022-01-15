@@ -5,10 +5,12 @@
 
 #include <dshow.h>
 #include <dmo.h>
+#include <mmreg.h>
 
 #pragma comment( lib, "strmiids.lib" )
 
 #include <assert.h>
+#include <djltrace.hxx>
 #include <djl_strm.hxx>
 
 class DjlParseWav
@@ -42,6 +44,39 @@ class DjlParseWav
                 WORD  validBits;          // # of valid bits
                 DWORD channelMask;        // speaker position mask
                 GUID  subFormat;          // the extended format of the data
+
+                WavSubchunk( WORD type, WORD chans, DWORD srate, WORD align, WORD bps )
+                {
+                    ZeroMemory( this, sizeof WavSubchunk );
+                    memcpy( &format, "fmt ", 4 );
+                    formatSize = sizeof WavSubchunk - 8;
+                    formatType = type;
+                    channels = chans;
+                    sampleRate = srate;
+                    blockAlign = align;
+                    bitsPerSample = bps;
+                    cbExtension = 0;
+                    dataRate = sampleRate * (DWORD) bitsPerSample / 8;
+                }
+
+                WavSubchunk()
+                {
+                    ZeroMemory( this, sizeof WavSubchunk );
+                }
+            };
+
+            struct WavInfochunk : WavChunkHeader
+            {
+                // 49 4e 46 4f 49 53 46 54 0e 00 00 00 64 61 76 69 64 6c 79 2e 30 31 2e 30 31 00
+                // INFOISFT....davidly.01.01.
+                byte info[26] = { 0x49, 0x4e, 0x46, 0x4f, 0x49, 0x53, 0x46, 0x54, 0x0e, 0x00, 0x00, 0x00, 0x64,
+                                  0x61, 0x76, 0x69, 0x64, 0x6c, 0x79, 0x2e, 0x30, 0x31, 0x2e, 0x30, 0x31, 0x00 };
+
+                void Init()
+                {
+                    memcpy( &format, "LIST", 4 );
+                    formatSize = sizeof( info );
+                }
             };
         
         #pragma pack( pop )
@@ -52,10 +87,9 @@ class DjlParseWav
             samples( 0 ),
             bytesPS( 0 ),
             sampleRate( 0.0 ),
-            forWrite( false )
+            forWrite( false ),
+            fmtType( 0 )
         {
-            ZeroMemory( &fmtSubchunk, sizeof fmtSubchunk );
-
             if ( stream.Ok() )
             {
                 successfulParse = parseStream( stream );
@@ -63,13 +97,14 @@ class DjlParseWav
             }
         } //DjlParseWav
 
-        DjlParseWav( WCHAR const * pwcFile, WavSubchunk &wavsub ) :
+        DjlParseWav( WCHAR const * pwcFile, WavSubchunk & wavsub ) :
             stream( pwcFile, true ),
             successfulParse( false ),
             samples( 0 ),
             bytesPS( 0 ),
             sampleRate( 0.0 ),
-            forWrite( true )
+            forWrite( true ),
+            fmtType( 0 )
         {
             fmtSubchunk = wavsub;
             sampleRate = (double) fmtSubchunk.sampleRate;
@@ -84,8 +119,36 @@ class DjlParseWav
                 return;
             }
 
-            if ( !stream.Ok() )
-                tracer.Trace( "DjlParseWav unable to open file %ws\n", pwcFile );
+            tracer.TraceDebug( !stream.Ok(), "DjlParseWav unable to open file %ws\n", pwcFile );
+        } //DjlParseWav
+
+        // Instantiate an in-memory wave file for reading
+
+        DjlParseWav( const WAVEFORMATEX * wf, byte * buffer, size_t size ) :
+            bytesPS( 0 ),
+            fmtType( 0 ),
+            forWrite( false ),
+            sampleRate( 0.0 ),
+            samples( 0 ),
+            successfulParse( false )
+        {
+            // wf may actually be a WAVEFORMATEXTENSIBLE, and that's fine.
+
+            if ( ( sizeof wf + wf->cbSize ) > sizeof WAVEFORMATEXTENSIBLE )
+            {
+                tracer.Trace( "malformed wafeformat -- it's too large to be a WAVEFORMATEXTENSIBLE\n" );
+                return;
+            }
+
+            successfulParse = true;
+            memcpy( &fmtSubchunk.formatType, wf, sizeof WAVEFORMATEX + wf->cbSize );
+            samples = (DWORD) ( size / ( fmtSubchunk.bitsPerSample / 8 ) / fmtSubchunk.channels );
+            sampleRate = (double) fmtSubchunk.sampleRate;
+            bytesPS = fmtSubchunk.bitsPerSample / 8;
+            fmtType = fmtSubchunk.formatType;
+
+            data.reset( new byte[ size ] );
+            memcpy( data.get(), buffer, size );
         } //DjlParseWav
 
         bool SuccessfulParse() { return successfulParse; }
@@ -93,21 +156,8 @@ class DjlParseWav
         WavSubchunk & GetFmt() { return fmtSubchunk; }
         const byte * GetData() { return data.get(); }
         DWORD Samples() { return samples; }
+        WORD Channels() { return fmtSubchunk.channels; }
         double SecondsOfSound() { return (double) samples / sampleRate; }
-
-        static void InitializeWavSubchunk( WavSubchunk & fmt, WORD type, WORD chans, DWORD srate, WORD align, WORD bps )
-        {
-            ZeroMemory( &fmt, sizeof fmt );
-            memcpy( &fmt.format, "fmt ", 4 );
-            fmt.formatSize = sizeof fmt - 8;
-            fmt.formatType = type;
-            fmt.channels = chans;
-            fmt.sampleRate = srate;
-            fmt.blockAlign = align;
-            fmt.bitsPerSample = bps;
-            fmt.cbExtension = 0;
-            fmt.dataRate = fmt.sampleRate * (DWORD) fmt.bitsPerSample / 8;
-        } //InitializeWavSubchunk
 
         const WCHAR * GetFormatType()
         {
@@ -128,6 +178,7 @@ class DjlParseWav
         void GetSample( DWORD s, double & left, double & right )
         {
             assert( s < samples );
+            assert( fmtSubchunk.channels > 1 );
 
             left = GetChannel( s, 0 );
             assert( left >= -1.0 );
@@ -148,6 +199,17 @@ class DjlParseWav
             return left;
         } //GetSample
 
+        double GetSampleInChannel( DWORD s, DWORD channel )
+        {
+            assert( s < samples );
+            assert( channel < fmtSubchunk.channels );
+
+            double left = GetChannel( s, channel );
+            assert( left >= -1.0 );
+            assert( left <= 1.0 );
+            return left;
+        } //GetSampleInChannel
+
         double GetSampleRight( DWORD s )
         {
             assert( s < samples );
@@ -163,15 +225,19 @@ class DjlParseWav
         {
             WavHeader wh;
             memcpy( &wh.riff, "RIFF", 4 );
-            wh.size = ( sizeof WavHeader + sizeof WavSubchunk + sizeof WavChunkHeader + bytesData ) - 8; // size of the file - 8;
+            wh.size = ( sizeof WavHeader + sizeof WavSubchunk + sizeof WavInfochunk + sizeof WavChunkHeader + bytesData ) - 8; // size of the file - 8;
             memcpy( &wh.wave, "WAVE", 4 );
+            stream.Write( &wh, sizeof wh );
+
+            stream.Write( &fmtSubchunk, sizeof fmtSubchunk );
+
+            WavInfochunk whInfo;
+            whInfo.Init();
+            stream.Write( &whInfo, sizeof whInfo );
 
             WavChunkHeader dataChunkOut;
-            memcpy( &dataChunkOut, "data", 4 );
+            memcpy( &dataChunkOut.format, "data", 4 );
             dataChunkOut.formatSize = bytesData;
-
-            stream.Write( &wh, sizeof wh );
-            stream.Write( &fmtSubchunk, sizeof fmtSubchunk );
             stream.Write( &dataChunkOut, sizeof dataChunkOut );
             stream.Write( pdata, bytesData );
 
@@ -207,7 +273,7 @@ class DjlParseWav
                 memcpy( pdata, &l, 3 );
                 memcpy( pdata + 3, &r, 3 );
             }
-            else if ( 4 == bps && 3 == formatType )
+            else if ( 32 == bps && 3 == formatType )
             {
                 float fl = (float) left;
                 float fr = (float) right;
@@ -221,9 +287,42 @@ class DjlParseWav
             }
         } //WriteSample
 
-        double Sample( double s, DWORD maxSamples = 128 )
+        void OverwriteSample( int index, double v, DWORD channel )
+        {
+            DWORD chOffset = channel * bytesPS;
+            DWORD offset = chOffset + ( index * fmtSubchunk.blockAlign );
+            byte *pdata = data.get() + offset;
+
+            if ( 1 == bytesPS && 1 == fmtType )
+            {
+                char x = (char) round( v * (double) 0x7f );
+                *pdata = x;
+            }
+            else if ( 2 == bytesPS && 1 == fmtType )
+            {
+                short x = (short) round( v * (double) 0x7fff );
+                memcpy( pdata, &x, sizeof x );
+            }
+            else if ( 3 == bytesPS && 1 == fmtType )
+            {
+                int32_t x = (int32_t) round( v * (double) 0x7fffff );
+                memcpy( pdata, &x, 3 );
+            }
+            else if ( 4 == bytesPS  && 3 == fmtType )
+            {
+                float x = (float) v;
+                memcpy( pdata, &x, sizeof x );
+            }
+            else
+            {
+                tracer.Trace( "unsupported bytesPS %d and formatType in OverwriteSample\n", bytesPS, fmtType );
+            }
+        } //OverwriteSample
+
+        double Sample( double s, DWORD maxSamples = 128, WORD channel = 0 )
         {
             assert( successfulParse );
+            assert( channel < fmtSubchunk.channels );
 
             // s is in radians but may outside the range of 0 .. ( 2 * PI ). In this case, modulus it
 
@@ -241,17 +340,17 @@ class DjlParseWav
 
             assert( index < samples );
 
-            double d = GetChannel( index, 0 );
+            double d = GetChannel( index, channel );
             assert( d <= 1.0 );
             assert( d >= -1.0 );
 
             return d;
         } //Sample
 
-        double Wave( double noteTime, double noteMultiplier )
+        double Wave( double noteTime, double noteMultiplier, WORD channel = 0 )
         {
             assert( successfulParse );
-
+            assert( channel < fmtSubchunk.channels );
             DWORD index = (DWORD) ( noteTime * sampleRate * noteMultiplier );
 
             // it's not a bug -- it's if we're past the end of the waveform
@@ -261,7 +360,7 @@ class DjlParseWav
 
             assert( index < samples );
 
-            double d = GetChannel( index, 0 );
+            double d = GetChannel( index, channel );
 
             assert( d <= 1.0 );
             assert( d >= -1.0 );
@@ -269,7 +368,65 @@ class DjlParseWav
             //tracer.Trace( "sample time %lf, index %d (of %d), sample %lf\n", noteTime, index, samples, d );
 
             return d;
-        } //Sample
+        } //Wave
+
+        void Normalize( double amount = 0.70794578 )
+        {
+            if ( 0 == samples )
+                return;
+
+            if ( amount > 1.0 || amount <= 0.0 )
+                return;
+
+            // set the maximum volume to the amount specified. -3db or about .70795 is normal
+
+            double maxSample = 0.0;
+
+            for ( DWORD s = 0; s < samples; s++ )
+            {
+                for ( int c = 0; c < fmtSubchunk.channels; c++ )
+                {
+                    double d = fabs( GetSampleInChannel( s, c ) );
+                    if ( d > maxSample )
+                        maxSample = d;
+                }
+            }
+
+            double factor = amount / maxSample;
+
+            for ( DWORD s = 0; s < samples; s++ )
+            {
+                for ( int c = 0; c < fmtSubchunk.channels; c++ )
+                {
+                    double d = factor * GetSampleInChannel( s, c );
+                    OverwriteSample( s, d, c );
+                }
+            }
+        } //Normalize
+
+        void Reverse()
+        {
+            if ( 0 == samples )
+                return;
+
+            DWORD top = 0;
+            DWORD bottom = samples - 1;
+
+            while ( top < bottom )
+            {
+                for ( int c = 0; c < fmtSubchunk.channels; c++ )
+                {
+                    double t = GetSampleInChannel( top, c );
+                    double b = GetSampleInChannel( bottom, c );
+
+                    OverwriteSample( top, b, c );
+                    OverwriteSample( bottom, t, c );
+                }
+
+                top++;
+                bottom--;
+            }
+        } //Reverse
 
     private:
 
@@ -371,7 +528,7 @@ class DjlParseWav
 
                     int bps = fmtSubchunk.bitsPerSample;
 
-                    if ( ( 1 != fmtSubchunk.channels && 2 != fmtSubchunk.channels ) ||
+                    if ( ( 0 == fmtSubchunk.channels ) ||
                          ( 0 == fmtSubchunk.dataRate ) ||
                          ( 8 != bps && 16 != bps && 24 != bps && 32 != bps && 64 != bps ) )
                     {
@@ -401,7 +558,7 @@ class DjlParseWav
                     data.reset( new byte[ chunk.formatSize ] );
                     stream.GetBytes( offset + 8, data.get(), chunk.formatSize );
         
-                    return true;
+                    return true; // don't worry about later chunks
                 }
         
                 offset += ( (__int64) chunk.formatSize + (__int64) 8 );
@@ -424,6 +581,23 @@ class DjlParseWav
                     memcpy( &d, data.get() + offset, sizeof d );
                     return d;
                 }
+                else if ( 4 == bytesPS )
+                {
+                    assert( 4 == sizeof( float ) );
+                    float f;
+                    memcpy( &f, data.get() + offset, sizeof f );
+
+                    // WAV files created with Scarlett hardware and Windows APIs result in slightly out of bounds values
+
+                    if ( f > 1.0 )
+                        f = 1.0;
+                    else if ( f < -1.0 )
+                        f = -1.0;
+
+                    return (double) f;
+                }
+                else
+                    tracer.Trace( "unexpected bytesPS %d in GetExtendedChannel IEEE_FLOAT\n" );
             }
 
             if ( MEDIASUBTYPE_PCM == fmtSubchunk.subFormat )
@@ -434,6 +608,8 @@ class DjlParseWav
                     memcpy( &l, data.get() + offset, sizeof l );
                     return (double) l / (double) (long) 0x7fffffff;
                 }
+                else
+                    tracer.Trace( "unexpected bytesPS %d in GetExtendedChannel PCM\n" );
             }
 
             return 0.0;
@@ -456,9 +632,7 @@ class DjlParseWav
                 if ( 0x8000 & v )
                     v |= 0xffff0000;
 
-                if ( v > 32767 )
-                    tracer.Trace( "v: %#x\n", v );
-
+                tracer.TraceDebug( v > 32767, "v: %#x\n", v );
                 assert( v <= 32767 );
                 assert( v >= -32768 );
 

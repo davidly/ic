@@ -567,7 +567,6 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
 
     const WORD bytesPerSample = sizeof( short );
     const int sampleRate = 88200;
-    DjlParseWav::WavSubchunk fmtOut;
     WCHAR awcWAV[ MAX_PATH ];
     wcscpy( awcWAV, pwcWAVBase );
     wcscat( awcWAV, L".wav" );
@@ -722,7 +721,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
 
     // write the WAV to disk
 
-    DjlParseWav::InitializeWavSubchunk( fmtOut, 1, 1, sampleRate, bytesPerSample, 8 * bytesPerSample );
+    DjlParseWav::WavSubchunk fmtOut( 1, 1, sampleRate, bytesPerSample, 8 * bytesPerSample );
     DjlParseWav output( awcWAV, fmtOut );
     if ( !output.OpenSuccessful() )
     {
