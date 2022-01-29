@@ -29,11 +29,15 @@ using namespace Microsoft::WRL;
 #include <djl_pa.hxx>
 #include <djltimed.hxx>
 #include <djl_wav.hxx>
+#include <djl_kmeans.hxx>
+#include <djl_kdtree.hxx>
 
 #pragma comment( lib, "ole32.lib" )
 #pragma comment( lib, "shlwapi.lib" )
 #pragma comment( lib, "oleaut32.lib" )
 #pragma comment( lib, "windowscodecs.lib" )
+#pragma comment( lib, "gdi32.lib" )
+#pragma comment( lib, "user32.lib" )
 
 CDJLTrace tracer;
 ComPtr<IWICImagingFactory> g_IWICFactory;
@@ -43,6 +47,19 @@ long long g_CollageStitchFloodTime = 0;
 long long g_CollageStitchCopyPixelsTime = 0;
 long long g_CollageStitchDrawTime = 0;
 long long g_CollageWriteTime = 0;
+long long g_ColorizeImageTime = 0;
+long long g_ShowColorsAllTime = 0;
+long long g_ShowColorsOpenTime = 0;
+long long g_ShowCopyPixelsTime = 0;
+long long g_ShowColorsClusterTime = 0;
+long long g_ShowColorsPaletteTime = 0;
+long long g_PosterizePixelsTime = 0;
+long long g_CopyPixelsTime = 0;
+long long g_WritePixelsTime = 0;
+long long g_ShowColorsCopyTime = 0;
+long long g_ShowColorsSortTime = 0;
+long long g_ShowColorsUniqueTime = 0;
+long long g_ShowColorsClusterPrepTime = 0;
 
 // 24bppBGR is convenient because:
 //    -- encoders support this format, and they don't all (e.g. JPG) support RGB
@@ -58,6 +75,170 @@ struct BitmapDimensions
     UINT width;
     UINT height;
 };
+
+enum ColorMapping { mapNone, mapColor, mapBrightness, mapHue, mapSaturation, mapGradient };
+
+union ColorBytes
+{
+    ColorBytes( DWORD d ) : dw( d ) {}
+
+    struct { byte l, m, h, zero; };
+    struct { byte b, g, r, bgrzero; };
+    struct { byte h, s, v, hsvzero; };
+    DWORD dw;
+};
+
+struct ColorizationData
+{
+    ColorizationData() : mapping( mapNone ) {}
+    ColorMapping mapping;
+    vector<DWORD> bgrdata;
+    vector<byte> hsvdata;        // may contain h, s, or v depending on mapping
+    unique_ptr<KDTreeBRG> kdtree;
+};
+
+const int sixtyDegrees = 42; // 60 out of 360, and 42 out of 256 (42 * 6 = 252)
+
+int RGBToV( int r, int g, int b )
+{
+    int v = ( __max( __max( r, g ), b ) );
+    assert( v >= 0 );
+    assert( v <= 255 );
+    return v;
+} //RGBToV
+
+void RGBToHSV( int r, int g, int b, int & h, int & s, int & v )
+{
+    int min; // note: v == max.
+    int diff;
+
+    if ( r > g )
+    {
+        if ( g < b )
+            min = g;
+        else
+            min = b;
+
+        if ( r > b )
+        {
+            v = r;
+            diff = v - min;
+            h = ( sixtyDegrees * ( g - b ) ) / diff;
+            if ( h < 0 )
+                h += ( 6 * sixtyDegrees );
+        }
+        else
+        {
+            v = b;
+            diff = v - min;
+            h = ( 4 * sixtyDegrees ) + ( ( sixtyDegrees * ( r - g ) ) / diff );
+        }
+    }
+    else if ( g > b )
+    {
+        v = g;
+
+        if ( r < b )
+            min = r;
+        else
+            min = b;
+
+        diff = v - min;
+        h = ( 2 * sixtyDegrees ) + ( ( sixtyDegrees * ( b - r ) ) / diff );
+
+    }
+    else
+    {
+        v = b;
+        min = r;
+        diff = b - r;
+        if ( 0 != diff )
+            h = ( 4 * sixtyDegrees ) + ( ( sixtyDegrees * ( r - g ) ) / diff );
+        else
+            h = 0;
+    }
+
+    if ( 0 == v )
+    {
+        h = 0;
+        s = 0;
+        return;
+    }
+
+    s = ( 255 * diff ) / v;
+
+    if ( 0 == s )
+        h = 0;
+
+    assert( h >= 0 );
+    assert( s >= 0 );
+    assert( v >= 0 );
+    assert( h <= 255 );
+    assert( s <= 255 );
+    assert( v <= 255 );
+} //RGBToHSV
+
+void BGRToHSV( DWORD color, int & h, int & s, int & v )
+{
+    int b = color & 0xff;
+    int g = ( color >> 8 ) & 0xff;
+    int r = ( color >> 16 ) & 0xff;
+    RGBToHSV( r, g, b, h, s, v );
+} //BGRToHSV
+
+template <class T> void Swap( T & a, T & b )
+{
+    T c = a;
+    a = b;
+    b = c;
+} //Swap
+
+int compare_brightness( const void * a, const void * b )
+{
+    ColorBytes cba( * (DWORD *) a );
+    ColorBytes cbb( * (DWORD *) b );
+
+    // the value is defined as the brightest channel. No additional work is done for ties
+
+    int maxvala = RGBToV( cba.r, cba.g, cba.b );
+    int maxvalb = RGBToV( cbb.r, cbb.g, cbb.b );
+
+    return maxvala - maxvalb;
+} //compare_brightness
+
+int compare_hue( const void * a, const void * b )
+{
+    DWORD ca = * (DWORD *) a;
+    DWORD cb = * (DWORD *) b;
+
+    int ha, sa, va;
+    BGRToHSV( ca, ha, sa, va );
+    int hb, sb, vb;
+    BGRToHSV( cb, hb, sb, vb );
+
+    return ha - hb;
+} //compare_hue
+
+int compare_saturation( const void * a, const void * b )
+{
+    DWORD ca = * (DWORD *) a;
+    DWORD cb = * (DWORD *) b;
+
+    int ha, sa, va;
+    BGRToHSV( ca, ha, sa, va );
+    int hb, sb, vb;
+    BGRToHSV( cb, hb, sb, vb );
+
+    return sa - sb;
+} //compare_saturation
+
+int compare_byte( const void * a, const void * b )
+{
+    int ia = (int) * (byte *) a;
+    int ib = (int) * (byte *) b;
+
+    return ia - ib;
+} //compare_byte
 
 void PrintGuid( GUID & guid )
 {
@@ -470,14 +651,36 @@ HRESULT CreateWICEncoder( WCHAR const * pwcPath, ComPtr<IWICBitmapEncoder> & enc
     return hr;
 } //CreateWICEncoder
 
+HRESULT CommitEncoder( ComPtr<IWICBitmapFrameEncode> & bitmapFrameEncode, ComPtr<IWICBitmapEncoder> & encoder )
+{
+    HRESULT hr = bitmapFrameEncode->Commit();
+    if ( FAILED( hr ) )
+    {
+        printf( "can't commit the frame encoder, error %#x\n", hr );
+        return hr;
+    }
+
+    hr = encoder->Commit();
+    if ( FAILED( hr ) )
+    {
+        printf( "can't commit the encoder, error %#x\n", hr );
+        return hr;
+    }
+
+    return hr;
+} //CommitEncoder
+
 template <class T> void FloodFill( T * buffer, int width, int height, int fillColor )
 {
-    // Only written and tested for 24bppBGR and 48bppBGR
+    // Only written and tested for 24bppBGR and 48bppRGB
 
     int bitsShiftLeft = 8 * ( sizeof T - 1 );
     T fillRed = ( ( fillColor & 0xff0000 ) >> 16 ) << bitsShiftLeft;
     T fillGreen = ( ( fillColor & 0xff00 ) >> 8 ) << bitsShiftLeft;
     T fillBlue = ( fillColor & 0xff ) << bitsShiftLeft;
+
+    if ( 2 == sizeof( T ) )
+        Swap( fillRed, fillBlue );
 
     int strideInT = StrideInBytes( width, 3 * 8 * sizeof T ) / sizeof T;
 
@@ -520,7 +723,11 @@ template <class T> void CopyPixels( int start, int beyond, int width, T * pOutBa
             for ( int x = 0; x < width; x++ )
             {
                 T b = *pRowIn++; T g = *pRowIn++; T r = *pRowIn++;
-                T grey = MakeGreyscale( r, g, b );
+
+                // The input/output image is either 24bppGBR or 48bppRGB
+
+                T grey = ( 1 == sizeof( T ) ) ? MakeGreyscale( r, g, b ) : MakeGreyscale( b, g, r );
+
                 *pRowOut++ = grey; *pRowOut++ = grey; *pRowOut++ = grey;
             }
         }
@@ -570,7 +777,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
     WCHAR awcWAV[ MAX_PATH ];
     wcscpy( awcWAV, pwcWAVBase );
     wcscat( awcWAV, L".wav" );
-    unique_ptr<short> wav;
+    vector<short> wav;
     int samples;
     
     if ( 1 == waveMethod || 2 == waveMethod )
@@ -579,8 +786,8 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
 
         bool allPixels = ( 1 == waveMethod) ? false : true;  // true == airplane?  false == fart?
         samples = allPixels ? width * height : CountPixelsOn( image, width, height, stride );
-        wav.reset( new short[ samples ] );
-        ZeroMemory( wav.get(), samples * sizeof( short ) );
+        wav.resize( samples );
+        ZeroMemory( wav.data(), samples * sizeof( short ) );
         int cur = 0;
     
         for ( int x = 0; x < width; x++ )
@@ -595,18 +802,18 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
     
                     short v = (short) ( round ( -yv * 32767.0 ) );
     
-                    wav.get()[ cur++ ] = v;
+                    wav[ cur++ ] = v;
                 }
                 else if ( allPixels )
-                    wav.get()[ cur++ ] = -32768;
+                    wav[ cur++ ] = -32768;
             }
         }
     }
     else if ( 3 == waveMethod || 4 == waveMethod )
     {
         byte *pb = image;
-        unique_ptr<short> maxY( new short[ width ] );
-        ZeroMemory( maxY.get(), width * sizeof( short ) );
+        vector<short> maxY( width );
+        ZeroMemory( maxY.data(), width * sizeof( short ) );
 
         if ( 3 == waveMethod )
         {
@@ -627,7 +834,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
                             if ( *p )
                             {
                                 anyY = true;
-                                maxY.get()[ x ] = (short) ( (double) ( height - y ) / (double) height * 32767 );
+                                maxY[ x ] = (short) ( (double) ( height - y ) / (double) height * 32767 );
                             }
                         }
                         else
@@ -647,7 +854,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
                             if ( *p )
                             {
                                 anyY = true;
-                                maxY.get()[ x ] = (short) ( (double) ( height - y ) / (double) height * 32767 );
+                                maxY[ x ] = (short) ( (double) ( height - y ) / (double) height * 32767 );
                             }
                         }
                         else
@@ -661,7 +868,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
                 {
                     byte * p = pb + ( ( height / 2 ) * stride ) + ( x * 3 );
                     *p++ = 255; *p++ = 255; *p = 255;
-                    maxY.get()[ x ] = height / 2;
+                    maxY[ x ] = height / 2;
                 }
             }
         }
@@ -679,7 +886,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
                     if ( *p > brightestY )
                     {
                         brightestY = *p;
-                        maxY.get()[ x ] = (short) ( (double) ( height - y ) / (double) height * 32767 );
+                        maxY[ x ] = (short) ( (double) ( height - y ) / (double) height * 32767 );
                     }
                 }
     
@@ -689,7 +896,7 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
                 {
                     byte * p = pb + ( ( height / 2 ) * stride ) + ( x * 3 );
                     *p++ = 255; *p++ = 255; *p = 255;
-                    maxY.get()[ x ] = height / 2;
+                    maxY[ x ] = height / 2;
                 }
             }
         }
@@ -702,21 +909,21 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
         int halfSamplesPerWave = samplesPerWave / 2;
         printf( "width %d, samplesPerWave %d, halfSamplesPerWave %d\n", width, samplesPerWave, halfSamplesPerWave );
 
-        wav.reset( new short[ samples ] );
-        ZeroMemory( wav.get(), samples * sizeof( short ) );
+        wav.resize( samples );
+        ZeroMemory( wav.data(), samples * sizeof( short ) );
 
         for ( int t = 0; t < halfSamplesPerWave; t++ )
         {
             int x = (int) round( (double) t / (double) halfSamplesPerWave * (double) width );
-            wav.get()[ t ] = maxY.get()[ x ];
-            wav.get()[ t + halfSamplesPerWave ] = - maxY.get()[x];
+            wav[ t ] = maxY[ x ];
+            wav[ t + halfSamplesPerWave ] = - maxY[ x ];
         }
 
         // replicate the wave throughout the buffer
 
         int copies = samples / samplesPerWave;
         for ( int c = 1; c < copies; c++ )
-            memcpy( wav.get() + c * samplesPerWave, wav.get(), samplesPerWave * sizeof( short ) );
+            memcpy( wav.data() + c * samplesPerWave, wav.data(), samplesPerWave * sizeof( short ) );
     }
 
     // write the WAV to disk
@@ -729,30 +936,299 @@ void CreateWAVFromImage( int waveMethod, WCHAR const * pwcWAVBase, BYTE * image,
         return;
     }
     
-    bool ok = output.WriteWavFile( (byte *) wav.get(), samples * sizeof( short ) );
+    bool ok = output.WriteWavFile( (byte *) wav.data(), samples * sizeof( short ) );
     if ( !ok )
         printf( "can't write WAV file %ws\n", awcWAV );
     else
         printf( "created WAV file: %ws\n", awcWAV );
 } //CreateWAVFromImage
 
-template <class T> __forceinline T Posterize( T * pt, int groupSpan, int groupAmount )
+template <class T> __forceinline T Posterize( T * pt, int groupSpan, vector<int> & values )
 {
-    // posterization level 1 means 2 values: 0 and 255
-    //                     2       3       : 0, 127, 255
-    //                     3       4       : 0, 85, 170, 255
+    // posterization level 1 values: 255         // it'll be all white
+    //                     2       : 0 and 255
+    //                     3       : 0, 127, 255
+    //                     4       : 0, 85, 170, 255
+    //                     5       : 0, 63, 127, 191, 255
+    //                     6       : 0, 51, 102, 153, 204, 255
+    //                     7       : 0, 42, 85, 127, 170, 212, 255
 
-    return ( *pt / groupSpan ) * groupAmount;
+    int element = *pt / groupSpan;
+    assert( element < values.size() );
+    return values[ element ];
 } //Posterize
 
 template <class T> void PosterizeImage( T * image, int stride, int width, int height, int posterizeLevel )
 {
+    CTimed timePosterize( g_PosterizePixelsTime );
     assert( 0 != posterizeLevel );
-    T * row = image;
     const int maxT = ( 1 << sizeof( T ) * 8 ) - 1;
-    const int values = posterizeLevel + 1;
-    const int groupSpan = maxT / values;
-    const int groupAmount = maxT / posterizeLevel;
+    const int groupSpan = ( maxT + 1 ) / posterizeLevel;
+
+    // use the vector so double math can compute the values once
+
+    vector<int> values( posterizeLevel + 1 );
+    for ( int v = 0; v < posterizeLevel; v++ )
+        values[ v ] = floor( (double) v * (double) maxT / (double) ( posterizeLevel - 1 ) );
+
+    values[ posterizeLevel - 1 ] = maxT; // make the brightest truly bright
+    values[ posterizeLevel ] = maxT;     // for cases like 5 when 255 is divisible by 51
+
+    for ( int y = 0; y < height; y++ )
+    {
+        T * pRow = (T *) ( (byte *) image + y * stride );
+    
+        for ( int x = 0; x < width; x++ )
+        {
+            *pRow++ = Posterize( pRow, groupSpan, values );
+            *pRow++ = Posterize( pRow, groupSpan, values );
+            *pRow++ = Posterize( pRow, groupSpan, values );
+        }
+    }
+} //PosterizeImage
+
+long ColorDistance( int ra, int ga, int ba, int rb, int gb, int bb )
+{
+    long diffr = ra - rb;
+    long diffg = ga - gb;
+    long diffb = ba - bb;
+    return ( diffr * diffr ) + ( diffg * diffg ) + ( diffb * diffb );
+} //ColorDistance
+
+long ColorDistance( int r, int g, int b, DWORD color2 )
+{
+    return ColorDistance( r, g, b, ( color2 >> 16 ) & 0xff, ( color2 >> 8 ) & 0xff, color2 & 0xff );
+} //ColorDistance
+
+DWORD FindNearestColor( int r, int g, int b, ColorizationData & cd, int posterizeLevel )
+{
+    assert( posterizeLevel <= cd.bgrdata.size() );
+
+    if ( mapColor == cd.mapping )
+    {
+        DWORD idnearest;
+        cd.kdtree->Nearest( r, g, b, idnearest );
+        assert( idnearest < posterizeLevel );
+        return idnearest;
+    }
+
+    if ( mapGradient == cd.mapping )
+    {
+        int v = RGBToV( r, g, b );
+        double dv = (double) v / 255.0;
+        int bucket = (int) ( dv * (double) posterizeLevel );
+        if ( bucket == posterizeLevel ) // v of 255 will hit this; round down
+            bucket--;
+
+        assert( bucket >= 0 );
+        assert( bucket < posterizeLevel );
+
+        return bucket;
+    }
+
+    assert( mapHue == cd.mapping || mapSaturation == cd.mapping || mapBrightness == cd.mapping );
+
+    int h, s, v;
+    RGBToHSV( r, g, b, h, s, v );
+
+    byte val = ( mapHue == cd.mapping ) ? h : ( mapSaturation == cd.mapping ) ? s : v;
+
+    // lower_bound finds the first item >= to the search item. The closest match may be that
+    // or the prior item. lower_bound should be n log(n), rather than linear
+
+    auto iterGE = std::lower_bound( cd.hsvdata.begin(), cd.hsvdata.end(), val );
+    int nearest = 0;
+    if ( iterGE == cd.hsvdata.end() )
+        nearest = cd.hsvdata.size() - 1;
+    else
+    {
+        DWORD index = std::distance( cd.hsvdata.begin(), iterGE );
+        if ( index > 0 )
+        {
+            byte ival = cd.hsvdata[ index ];
+            byte im1val = cd.hsvdata[ index - 1 ];
+
+            if ( abs( (int) ival - (int) val ) < abs( (int) im1val - (int) val ) )
+                nearest = index;
+            else
+                nearest = index - 1;
+        }
+    }
+
+    return nearest;
+} //FindNearestColor
+
+// Posterize, but use the specified colors to map to brightness
+
+template <class T> void ColorizeImage( T * image, int stride, int width, int height, int posterizeLevel, ColorizationData * colorizationData )
+{
+    CTimed timeColorize( g_ColorizeImageTime );
+
+    assert( 0 != posterizeLevel );
+    const int maxT = ( 1 << sizeof( T ) * 8 ) - 1;
+    const int groupSpan = ( maxT + 1 ) / posterizeLevel;
+    const DWORD count = colorizationData->bgrdata.size();
+    printf( "colorizing posterize %d, colors %zd, method %d\n", posterizeLevel, colorizationData->bgrdata.size(), colorizationData->mapping );
+
+    //for ( int y = 0; y < height; y++ )
+    parallel_for ( 0, height, [&] ( int y )
+    {
+        T * pRow = (T *) ( (byte *) image + y * stride );
+    
+        for ( int x = 0; x < width; x++ )
+        {
+            byte r, g, b;
+
+            // The input/output image is either 24bppGBR or 48bppRGB
+
+            if ( 1 == sizeof( T ) )
+            {
+                b = pRow[ 0 ];
+                g = pRow[ 1 ];
+                r = pRow[ 2 ];
+            }
+            else
+            {
+                assert( 2 == sizeof( T ) );
+
+                r = (unsigned short) pRow[ 0 ] >> 8;
+                g = (unsigned short) pRow[ 1 ] >> 8;
+                b = (unsigned short) pRow[ 2 ] >> 8;
+            }
+
+            DWORD index = FindNearestColor( r, g, b, *colorizationData, posterizeLevel );
+
+            // index = __min( count - 1, y / ( height / posterizeLevel ) );      // testing to see all colors
+
+            assert( index < count );
+            DWORD c = colorizationData->bgrdata[ index ];
+            ColorBytes cb( c );
+
+            if ( 1 == sizeof( T ) )
+            {
+                pRow[ 0 ] = cb.b;
+                pRow[ 1 ] = cb.g;
+                pRow[ 2 ] = cb.r;
+            }
+            else
+            {
+                pRow[ 0 ] = ( (T) cb.r ) << 8;
+                pRow[ 1 ] = ( (T) cb.g ) << 8;
+                pRow[ 2 ] = ( (T) cb.b ) << 8;
+            }
+
+            pRow += 3;
+        }
+    } );
+} //ColorizeImage
+
+int compare_colors( const void * a, const void * b )
+{
+    int ca = * (int *) a;
+    int cb = * (int *) b;
+
+    return ca - cb;
+} //compare_colors
+
+unsigned long lrand()
+{
+    unsigned long r = 0;
+
+    for ( int i = 0; i < 5; i++ )
+        r = ( r << 15 ) | ( rand() & 0x7FFF );
+
+    return r;
+} //lrand
+
+HRESULT PngFromVector( vector<DWORD> & vec, WCHAR const * pwcFile )
+{
+    int width = 128;
+    int height = vec.size() / width;
+    if ( vec.size() % width )
+        height++;
+
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> bitmapFrameEncode;
+    HRESULT hr = CreateWICEncoder( pwcFile, encoder, bitmapFrameEncode, L"image/png", false );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't create a wic encoder, error %#x\n", hr );
+        return hr;
+    }
+    
+    hr = bitmapFrameEncode->SetSize( width, height );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to set encoder frame size %d, %d, error %#x\n", width, height, hr );
+        return hr;
+    }
+    
+    WICPixelFormatGUID formatRequest = g_GuidPixelFormat;
+    hr = bitmapFrameEncode->SetPixelFormat( & formatRequest );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to set encoder pixel format %#x\n", hr );
+        return hr;
+    }
+    
+    if ( formatRequest != g_GuidPixelFormat )
+    {
+        printf( "didn't get the pixel format requested for writing\n" );
+        return E_FAIL;
+    }
+    
+    int bppOut = g_BitsPerPixel;
+    int strideOut = StrideInBytes( width, bppOut );
+    int cbOut = strideOut * height;
+    vector<byte> bufferOut( cbOut );
+    ZeroMemory( bufferOut.data(), cbOut );
+    printf( "buffer size: %d\n", cbOut );
+    printf( "vec size %d\n", (int) vec.size() );
+    printf( "width %d, height %d\n", width, height );
+
+    for ( int y = 0; y < height; y++ )
+    {
+        for ( int x = 0; x < width; x++ )
+        {
+            byte * p = bufferOut.data() + y * strideOut + 3 * x;
+            int vecoffset = y * width + x;
+            if ( vecoffset < vec.size() )
+            {
+                ColorBytes cb( vec[ y * width + x ] );
+                *p++ = cb.b;
+                *p++ = cb.g;
+                *p++ = cb.r;
+            }
+        }
+    }
+    
+    hr = bitmapFrameEncode->WritePixels( height, strideOut, cbOut, bufferOut.data() );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to write pixels %#x\n", hr );
+        return hr;
+    }
+    
+    hr = CommitEncoder( bitmapFrameEncode, encoder );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to commit the encoder %#x\n", hr );
+        return hr;
+    }
+
+    return hr;
+} //PngFromVector
+
+template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int width, int height,
+                                              int showColorCount, vector<DWORD> & centroids,
+                                              bool printColors )
+{
+    // store all the colors in a DWORD vector, removing adjacent duplicates
+
+    CTimed timed1( g_ShowColorsCopyTime );
+    vector<DWORD> colors;
+    T * row = p;
+    DWORD prevColor = 0xffffffff;
 
     for ( int y = 0; y < height; y++ )
     {
@@ -760,19 +1236,367 @@ template <class T> void PosterizeImage( T * image, int stride, int width, int he
     
         for ( int x = 0; x < width; x++ )
         {
-            *pRow++ = Posterize( pRow, groupSpan, groupAmount );
-            *pRow++ = Posterize( pRow, groupSpan, groupAmount );
-            *pRow++ = Posterize( pRow, groupSpan, groupAmount );
+            byte r, g, b;
+
+            // The input/output image is either 24bppGBR or 48bppRGB
+
+            if ( 1 == sizeof( T ) )
+            {
+                b = pRow[ 0 ];
+                g = pRow[ 1 ];
+                r = pRow[ 2 ];
+            }
+            else
+            {
+                assert( 2 == sizeof( T ) );
+
+                r = (byte) ( (unsigned short) pRow[ 0 ] >> 8 );
+                g = (byte) ( (unsigned short) pRow[ 1 ] >> 8 );
+                b = (byte) ( (unsigned short) pRow[ 2 ] >> 8 );
+            }
+
+            DWORD color = b | ( g << 8 ) | ( r << 16 );
+
+            if ( color != prevColor )
+            {
+                colors.push_back( color );
+                prevColor = color;
+            }
+
+            pRow += 3;
         }
 
         row += ( stride * sizeof T );
     }
-} //PosterizeImage
+
+    timed1.Complete();
+    CTimed timed2( g_ShowColorsSortTime );
+    //qsort( colors.data(), colorsSoFar, sizeof( DWORD ), compare_colors );
+    std::sort( colors.begin(), colors.end() ); // 30% faster than qsort
+    timed2.Complete();
+
+    // copy unique colors
+
+    CTimed timed3( g_ShowColorsUniqueTime );
+    vector<DWORD> uniqueColors;
+    prevColor = 0xffffffff;
+
+    for ( int i = 0; i < colors.size(); i++ )
+    {
+        if ( colors[ i ] != prevColor )
+        {
+            uniqueColors.push_back( colors[ i ] );
+            prevColor = colors[ i ];
+        }
+    }
+
+    timed3.Complete();
+
+    CTimed timed4( g_ShowColorsClusterPrepTime );
+
+    showColorCount = __min( showColorCount, uniqueColors.size() );
+    if ( printColors )
+    {
+        printf( "pixels in image: %d\n", height * width );
+        printf( "first-pass unique: %zd\n", colors.size() );
+        printf( "unique colors: %zd\n", uniqueColors.size() );
+        printf( "shown colors: %d\n", showColorCount );
+
+        //for ( int i = 0; i < uniqueColors.size(); i++ )
+        //    printf( "  color %d: %#x\n", i, uniqueColors[ i ] );
+    }
+
+    colors.clear();
+
+    // get a sample set of the colors for clustering
+
+    const int sampleSize = 10000;
+
+    if ( uniqueColors.size() <= showColorCount )
+    {
+        // no need to cluster -- just use the unique colors
+
+        for ( int i = 0; i < uniqueColors.size(); i++ )
+            centroids.push_back( uniqueColors[ i ] );
+
+        timed4.Complete();
+    }
+    else
+    {
+        int clusteredColorCount = __max( showColorCount, __min( sampleSize, uniqueColors.size() ) );
+        if ( printColors )
+            printf( "clusteredColorCount: %d\n", clusteredColorCount );
+    
+        vector<DWORD> clusteredColors( clusteredColorCount );
+    
+        srand( time( 0 ) );
+        for ( int i = 0; i < clusteredColorCount; i++ )
+            clusteredColors[ i ] = uniqueColors[ lrand() % uniqueColors.size() ];
+
+        uniqueColors.clear();
+        timed4.Complete();
+
+        // cluster the sample set
+    
+        CTimed timeCluster( g_ShowColorsClusterTime );
+        vector<KMeansPoint> all_points;
+    
+        for ( int i = 0; i < clusteredColorCount; i++ )
+        {
+            ColorBytes cb( clusteredColors[ i ] );
+            all_points.emplace_back( i, cb.r, cb.g, cb.b );
+        }
+    
+        const int iters = 100;
+        const int K = showColorCount;
+        KMeans kmeans( K, iters );
+        kmeans.run( all_points );
+        kmeans.sort();
+        //kmeans.getbgrSynthetic( centroids ); // get the synthetic color centroids; may not be in actual image
+        kmeans.getbgrClosest( centroids );  // get the actual image colors closest to the centoids
+
+        #ifndef NDEBUG // ensure clustering gave back colors from the original set
+            for ( int i = 0; i < centroids.size(); i++ )
+            {
+                bool found = false;
+                for ( int j = 0; j < clusteredColors.size(); j++ )
+                {
+                    if ( centroids[ i ] == clusteredColors[ j ] )
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                assert( found );
+            }
+        #endif
+    }
+
+    if ( printColors )
+    {
+        printf( "centroid colors ordered by cluster size:\n" );
+        printf( "static DWORD ColorizationColors%zd[] =\n{", centroids.size() );
+
+        for ( int i = 0; i < centroids.size(); i++ )
+        {
+            if ( 0 == ( i % 8 ) )
+                printf( "\n    " );
+            printf( "%#08x, ", centroids[ i ] );
+        }
+        printf( "\n};\n" );
+    }
+} //ShowColors
+
+HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & centroids, bool printColors,
+                    WCHAR const * pwcOutput = 0, WCHAR const * outputMimetype = 0 )
+{
+    CTimed timedShowColorsAll( g_ShowColorsAllTime );
+    CTimed timedShowColorsOpen( g_ShowColorsOpenTime );
+
+    ComPtr<IWICBitmapSource> source;
+    ComPtr<IWICBitmapFrameDecode> frame;
+
+    HRESULT hr = LoadWICBitmap( input, source, frame, true );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't load wic bitmap %#x\n", hr );
+        return hr;
+    }
+
+    UINT width = 0;
+    UINT height = 0;
+
+    hr = source->GetSize( &width, &height );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't get dimensions of path %ws\n", input );
+        return hr;
+    }
+
+    timedShowColorsOpen.Complete();
+
+#if false // even though this can be much faster, WIC modifies colors when resizing, even if there are 2 colors!
+    const UINT maxSourceImageDimension = 1000;
+
+    if ( width > maxSourceImageDimension || height > maxSourceImageDimension )
+    {
+        hr = ScaleWICBitmap( source, maxSourceImageDimension );
+        if ( FAILED( hr ) )
+        {
+            printf( "can't scale the input bitmap, error %#x\n", hr );
+            return hr;
+        }
+
+        hr = source->GetSize( &width, &height );
+        if ( FAILED( hr ) )
+        {
+            printf( "can't get dimensions after scaling of path %ws\n", input );
+            return hr;
+        }
+    }
+#endif
+
+    CTimed showCopyPixels( g_ShowCopyPixelsTime );
+    int bppIn = g_BitsPerPixel;
+    int strideIn = StrideInBytes( width, bppIn );
+
+    int cbIn = strideIn * height;
+    vector<byte> bufferIn( cbIn );
+
+    hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.data() );
+    showCopyPixels.Complete();
+    if ( FAILED( hr ) )
+    {
+        printf( "ShowColors() failed to read input pixels in CopyPixels() %#x\n", hr );
+        return hr;
+    }
+
+    ShowColorsFromBuffer( bufferIn.data(), bppIn, strideIn, width, height, showColorCount, centroids, printColors );
+
+    if ( pwcOutput )
+    {
+        CTimed showColorsPalette( g_ShowColorsPaletteTime );
+
+        // create an output bitmap 128 pixels wide with a 16 pixel band for each color
+        const UINT width = 128;
+        const UINT bandHeight = 16;
+
+        ComPtr<IWICBitmapEncoder> encoder;
+        ComPtr<IWICBitmapFrameEncode> bitmapFrameEncode;
+        HRESULT hr = CreateWICEncoder( pwcOutput, encoder, bitmapFrameEncode, outputMimetype, false );
+        if ( FAILED( hr ) )
+        {
+            printf( "can't create a wic encoder, error %#x\n", hr );
+            return hr;
+        }
+    
+        UINT height = bandHeight * centroids.size();
+        hr = bitmapFrameEncode->SetSize( width, height );
+        if ( FAILED( hr ) )
+        {
+            printf( "failed to set encoder frame size %d, %d, error %#x\n", width, height, hr );
+            return hr;
+        }
+    
+        WICPixelFormatGUID formatRequest = g_GuidPixelFormat;
+        hr = bitmapFrameEncode->SetPixelFormat( & formatRequest );
+        if ( FAILED( hr ) )
+        {
+            printf( "failed to set encoder pixel format %#x\n", hr );
+            return hr;
+        }
+    
+        if ( formatRequest != g_GuidPixelFormat )
+        {
+            printf( "didn't get the pixel format requested for writing\n" );
+            return E_FAIL;
+        }
+    
+        int bppOut = g_BitsPerPixel;
+        int strideOut = StrideInBytes( width, bppOut );
+        int cbOut = strideOut * height;
+
+        // write the RGB values over color bars for each entry in the centroids palette
+
+        HFONT hfont = CreateFont( bandHeight - 1, 0, 0, 0, FW_THIN, FALSE, FALSE, FALSE, ANSI_CHARSET, OUT_OUTLINE_PRECIS,
+                                  CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH, L"Consolas" );
+        if ( 0 == hfont )
+        {
+            hr = HRESULT_FROM_WIN32( GetLastError() );
+            printf( "can't create a font, error %#x\n", hr );
+            return hr;
+        }
+
+        HDC memdc = CreateCompatibleDC( GetDC( 0 ) );
+        if ( 0 == memdc )
+        {
+            DeleteObject( hfont );
+            hr = HRESULT_FROM_WIN32( GetLastError() );
+            printf( "can't create a compatible dc, error %#x\n", hr );
+            return hr;
+        }
+
+        BITMAPINFO bmi;
+        ZeroMemory( &bmi, sizeof bmi );
+        bmi.bmiHeader.biSize = sizeof bmi;
+        bmi.bmiHeader.biWidth = width;
+        bmi.bmiHeader.biHeight = -height; // negative means top-down dib
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 24;
+        bmi.bmiHeader.biCompression = BI_RGB;   
+        byte *pbBits;
+        HBITMAP bitmap = CreateDIBSection( GetDC( 0 ), &bmi, DIB_RGB_COLORS, (void **) &pbBits, 0, 0 );
+        if ( 0 == bitmap )
+        {
+            DeleteObject( hfont );
+            DeleteDC( memdc );
+            hr = HRESULT_FROM_WIN32( GetLastError() );
+            printf( "can't create a DIBSection, error %#x\n", hr );
+            return hr;
+        }
+
+        HBITMAP oldbitmap = (HBITMAP) SelectObject( memdc, bitmap );
+        HFONT fontOld = (HFONT) SelectObject( memdc, hfont );
+
+        for ( int c = 0; c < centroids.size(); c++ )
+        {
+            int yoffset = c * bandHeight;
+            RECT rc = { 0, (LONG) yoffset, (LONG) width, (LONG) ( yoffset + bandHeight ) };
+            ColorBytes cb( centroids[ c ] );
+            Swap( cb.r, cb.b ); // GDI APIs take RGB, but the data in pvBits appears to be BGR
+            DWORD colorRGB = cb.dw;
+            COLORREF crBkOld = SetBkColor( memdc, colorRGB );
+            COLORREF crText = ColorDistance( 0, 0, 0, colorRGB ) < ColorDistance( 255, 255, 255, colorRGB ) ? 0xffffff : 0;
+            COLORREF crTextOld = SetTextColor( memdc, crText );
+            HBRUSH brush = CreateSolidBrush( colorRGB );
+            FillRect( memdc, &rc, brush );
+            DeleteObject( brush );
+
+            // RGB hex standard notation is actually BGR (blue is lowest byte on the right).
+            // the width in %#06x for wsprintf is different than printf. printf includes the 0x in the
+            // width and wsprintf does not.
+
+            static WCHAR awcColor[ 20 ];
+            wsprintf( awcColor, L"%#06x", centroids[ c ] );
+            TextOut( memdc, 1, 1 + yoffset, awcColor, wcslen( awcColor ) );
+
+            SetTextColor( memdc, crTextOld );
+            SetBkColor( memdc, crBkOld );
+        }
+
+        GdiFlush(); // make sure all the writes above are complete
+        hr = bitmapFrameEncode->WritePixels( height, strideOut, cbOut, pbBits );
+
+        // delay hr check until after resources are freed
+
+        SelectObject( memdc, fontOld );
+        SelectObject( memdc, oldbitmap );
+        DeleteObject( hfont );
+        DeleteDC( memdc );
+        DeleteObject( bitmap );
+    
+        if ( FAILED( hr ) )
+        {
+            printf( "failed to write pixels %#x\n", hr );
+            return hr;
+        }
+    
+        hr = CommitEncoder( bitmapFrameEncode, encoder );
+        if ( FAILED( hr ) )
+        {
+            printf( "failed to commit the encoder %#x\n", hr );
+            return hr;
+        }
+    }
+
+    return hr;
+} //ShowColors
 
 // Note: this is effectively a blt -- there is no stretching or scaling.
 
 HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source, int waveMethod, const WCHAR * pwcWAVBase,
-                   int posterizeLevel, bool makeGreyscale, int offsetX, int offsetY, int width, int height, int bppIn, int bppOut )
+                   int posterizeLevel, ColorizationData * colorizationData, bool makeGreyscale, int offsetX, int offsetY,
+                   int width, int height, int bppIn, int bppOut )
 {
     int strideIn = StrideInBytes( width, bppIn );
 
@@ -788,14 +1612,15 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
     }
 
     int cbIn = strideIn * height;
-    unique_ptr<::byte> bufferIn( new ::byte[ cbIn ] );
+    vector<byte> bufferIn( cbIn );
     
     {
         CTimed timed( g_CollageStitchCopyPixelsTime );
+        CTimed timedCopyPixels( g_CopyPixelsTime );
 
         // Almost all of the runtime of this app will be in source->CopyPixels(), where the input file is parsed
 
-        HRESULT hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.get() );
+        HRESULT hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.data() );
         if ( FAILED( hr ) )
         {
             printf( "DrawImage() failed to read input pixels in CopyPixels() %#x\n", hr );
@@ -806,14 +1631,23 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
     CTimed stitchDraw( g_CollageStitchDrawTime );
     int bytesppOut = bppOut / 8;
     byte * pbOutBase = pOut + ( offsetY * strideOut ) + ( offsetX * bytesppOut );
-    byte * pbInBase = bufferIn.get();
+    byte * pbInBase = bufferIn.data();
 
     if ( 24 == bppIn )
         CopyPixels( 0, height, width, pbOutBase, pbInBase, strideOut, strideIn, makeGreyscale );
     else
         CopyPixels( 0, height, width, (USHORT *) pbOutBase, (USHORT *) pbInBase, strideOut, strideIn, makeGreyscale );
 
-    if ( 0 != posterizeLevel )
+    if ( 0 != colorizationData )
+    {
+        assert( 0 != posterizeLevel );
+
+        if ( 24 == bppOut )
+            ColorizeImage( pOut, strideOut, width, height, posterizeLevel, colorizationData );
+        else
+            ColorizeImage( (USHORT *) pOut, strideOut, width, height, posterizeLevel, colorizationData );
+    }
+    else  if ( 0 != posterizeLevel )
     {
         if ( 24 == bppOut )
             PosterizeImage( pOut, strideOut, width, height, posterizeLevel );
@@ -827,28 +1661,10 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
     return S_OK;
 } //DrawImage
 
-HRESULT CommitEncoder( ComPtr<IWICBitmapFrameEncode> & bitmapFrameEncode, ComPtr<IWICBitmapEncoder> & encoder )
-{
-    HRESULT hr = bitmapFrameEncode->Commit();
-    if ( FAILED( hr ) )
-    {
-        printf( "can't commit the frame encoder, error %#x\n", hr );
-        return hr;
-    }
-
-    hr = encoder->Commit();
-    if ( FAILED( hr ) )
-    {
-        printf( "can't commit the encoder, error %#x\n", hr );
-        return hr;
-    }
-
-    return hr;
-} //CommitEncoder
-
 HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & source, ComPtr<IWICBitmapFrameDecode> & frame,
-                        int longEdge, int waveMethod, int posterizeLevel, bool makeGreyscale, double aspectRatio, int fillColor,
-                        WCHAR const * outputMimetype, bool lowQualityOutput )
+                        int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
+                        bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype,
+                        bool lowQualityOutput )
 {
     ComPtr<IWICBitmapEncoder> encoder;
     ComPtr<IWICBitmapFrameEncode> bitmapFrameEncode;
@@ -1039,22 +1855,23 @@ HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & sour
 
         int strideOut = StrideInBytes( wOut, bppOut );
         int cbOut = strideOut * hOut;
-        unique_ptr<::byte> bufferOut( new ::byte[ cbOut ] );
+        vector<byte> bufferOut( cbOut );
 
         if ( 24 == bppOut )
-            FloodFill( bufferOut.get(), wOut, hOut, fillColor );
+            FloodFill( bufferOut.data(), wOut, hOut, fillColor );
         else
-            FloodFill( (USHORT *) bufferOut.get(), wOut, hOut, fillColor );
+            FloodFill( (USHORT *) bufferOut.data(), wOut, hOut, fillColor );
 
-        hr = DrawImage( bufferOut.get(), strideOut, source, waveMethod, pwcOutput, posterizeLevel, makeGreyscale,
-                        offsetX, offsetY, wIn, hIn, bppIn, bppOut );
+        hr = DrawImage( bufferOut.data(), strideOut, source, waveMethod, pwcOutput, posterizeLevel,
+                        colorizationData, makeGreyscale, offsetX, offsetY, wIn, hIn, bppIn, bppOut );
         if ( FAILED( hr ) )
         {
             printf( "failed to DrawImage %#x\n", hr );
             return hr;
         }
 
-        hr = bitmapFrameEncode->WritePixels( hOut, strideOut, cbOut, bufferOut.get() );
+        CTimed writePixels( g_WritePixelsTime );
+        hr = bitmapFrameEncode->WritePixels( hOut, strideOut, cbOut, bufferOut.data() );
         if ( FAILED( hr ) )
         {
             printf( "failed to write pixels %#x\n", hr );
@@ -1090,8 +1907,8 @@ HRESULT GetBitmapDimensions( WCHAR const * path, UINT & width, UINT & height )
 } //GetBitmapDimensions
 
 HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<BitmapDimensions> & dimensions, int imagesWide, int imagesHigh,
-                      int cellDX, int cellDY, int stitchDX, int stitchDY, int fillColor, int waveMethod, int posterizeLevel, bool makeGreyscale,
-                      WCHAR const * outputMimetype, bool lowQualityOutput )
+                      int cellDX, int cellDY, int stitchDX, int stitchDY, int fillColor, int waveMethod, int posterizeLevel,
+                      ColorizationData * colorizationData, bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput )
 {
     CTimed timeStitch( g_CollageStitchTime );
     bool makeEverythingSquare = ( cellDX == cellDY );
@@ -1127,12 +1944,12 @@ HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<Bi
     
     int strideOut = StrideInBytes( stitchDX, g_BitsPerPixel );
     int cbOut = strideOut * stitchDY;
-    unique_ptr<::byte> bufferOut( new ::byte[ cbOut ] );
+    vector<byte> bufferOut( cbOut );
     
     {
         CTimed timedFlood( g_CollageStitchFloodTime );
     
-        FloodFill( bufferOut.get(), stitchDX, stitchDY, fillColor );
+        FloodFill( bufferOut.data(), stitchDX, stitchDY, fillColor );
     }
     
     //for ( int y = 0; y < imagesHigh; y++ )
@@ -1191,8 +2008,8 @@ HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<Bi
                         }
                     }
     
-                    DrawImage( bufferOut.get(), strideOut, source, waveMethod, pwcOutput, posterizeLevel, makeGreyscale,
-                               rectX, rectY, width, height, g_BitsPerPixel, g_BitsPerPixel );
+                    DrawImage( bufferOut.data(), strideOut, source, waveMethod, pwcOutput, posterizeLevel, colorizationData,
+                               makeGreyscale, rectX, rectY, width, height, g_BitsPerPixel, g_BitsPerPixel );
                 }
             }
         });
@@ -1204,7 +2021,7 @@ HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<Bi
 
     CTimed timeWrite( g_CollageWriteTime );
 
-    hr = bitmapFrameEncode->WritePixels( stitchDY, strideOut, cbOut, bufferOut.get() );
+    hr = bitmapFrameEncode->WritePixels( stitchDY, strideOut, cbOut, bufferOut.data() );
     if ( FAILED( hr ) )
     {
         printf( "failed to write pixels %#x\n", hr );
@@ -1216,9 +2033,9 @@ HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<Bi
     return hr;
 } //StitchImages
 
-HRESULT GenerateCollage( WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel, bool makeGreyscale,
-                         double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool randomizeCollage,
-                         bool lowQualityOutput )
+HRESULT GenerateCollage( WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
+                         ColorizationData * colorizationData, bool makeGreyscale, double aspectRatio,
+                         int fillColor, WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput )
 {
     CTimed timePrep( g_CollagePrepTime );
 
@@ -1427,11 +2244,11 @@ HRESULT GenerateCollage( WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge
     printf( "collage will be %d by %d, each element %d by %d, and %d by %d images\n", stitchX, stitchY, minDXEdge, minDYEdge, imagesWide, imagesHigh );
 
     return StitchImages( pwcOutput, pathArray, dimensions, imagesWide, imagesHigh, minDXEdge, minDYEdge, stitchX, stitchY,
-                         fillColor, 0, posterizeLevel, makeGreyscale, outputMimetype, lowQualityOutput );
+                         fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput );
 } //GenerateCollage
 
-HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, int waveMethod, int posterizeLevel, bool makeGreyscale,
-                      double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool lowQualityOutput )
+HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
+                      bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool lowQualityOutput )
 {
     ComPtr<IWICBitmapSource> source;
     ComPtr<IWICBitmapFrameDecode> frame;
@@ -1439,15 +2256,19 @@ HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, i
 
     HRESULT hr = LoadWICBitmap( input, source, frame, force24bppBGR );
     if ( SUCCEEDED( hr ) )
-        hr = WriteWICBitmap( output, source, frame, longEdge, waveMethod, posterizeLevel, makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput );
+        hr = WriteWICBitmap( output, source, frame, longEdge, waveMethod, posterizeLevel, colorizationData,
+                             makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput );
     
     frame.Reset();
     source.Reset();
     return hr;
 } //ConvertImage
 
-void Usage()
+void Usage( char * message = 0 )
 {
+    if ( message )
+        printf( "%s\n", message );
+
     printf( "usage: ic <input> /o:<filename>\n" );
     printf( "  Image Convert\n" );
     printf( "  arguments: <input>           The input image filename or path specifier for a collage.\n" );
@@ -1458,11 +2279,19 @@ void Usage()
     printf( "             -i                Show CPU and RAM usage.\n" );
     printf( "             -l:<longedge>     Pixel count for the long edge of the output photo.\n" );
     printf( "             -o:<filename>     The output filename. Required argument. File will contain no exif info like GPS location.\n" );
-    printf( "             -p:x              Posterization level. 0..35 inclusive, where 0 means none. Default is 0.\n" );
+    printf( "             -p:x              Posterization level. 1..256 inclusive, Default 0 means none. # colors per channel.\n" );
     printf( "             -q                Sacrifice image quality to produce a smaller JPG output file (4:2:2 not 4:4:4, 60%% not 100%%).\n" );
     printf( "             -r                Randomize the layout of images in a collage.\n" );
+    printf( "             -s:x              Clusters color groups and shows most common X colors, Default is 64\n" );
     printf( "             -t                Enable debug tracing to ic.txt. Use -T to start with a fresh ic.txt\n" );
     printf( "             -w:x              Create a WAV file based on the image using methods 1..10. (prototype)\n" );
+    printf( "             -zc:x             Colorization. Works like posterization (1-256), but maps to a built-in color table.\n" );
+    printf( "             -zc:x,color1,...  Specify x colors that should be used. See example below.\n" );
+    printf( "             -zc:x;filename    Use centroids from x color clusters taken from the input file.\n" );
+    printf( "             -zb               Same as -z, but maps colors by matching brightness instead of color.\n" );
+    printf( "             -zs               Same as -z, but maps colors by matching saturation instead of color.\n" );
+    printf( "             -zh               Same as -z, but maps colors by matching hue instead of color.\n" );
+    printf( "             -zg               Same as -z, but maps colors by matching brightness gradient instead of color.\n" );
     printf( "  sample usage: (arguments can use - or /)\n" );
     printf( "    ic picture.jpg /o:newpicture.jpg /l:800\n" );
     printf( "    ic picture.jpg /p o:newpicture.jpg /l:800\n" );
@@ -1470,10 +2299,18 @@ void Usage()
     printf( "    ic tsuki.tif /o:newpicture.jpg /l:300 /a:1x4 /f:0x003300\n" );
     printf( "    ic miku.tif /o:newpicture.tif /l:300 /a:1x4 /f:2211\n" );
     printf( "    ic phoebe.jpg /o:phoebe_grey.tif /l:3000 /g\n" );
-    printf( "    ic julien.jpg /o:julien_grey_posterized.tif /l:3000 /g /p:1 /w:1\n" );
+    printf( "    ic julien.jpg /o:julien_grey_posterized.tif /l:3000 /g /p:2 /w:1\n" );
     printf( "    ic picture.jpg /o:newpicture.jpg /l:2000 /a:5.2x3.9\n" );
     printf( "    ic *.jpg /c /o:c:\\collage.jpg /l:2000 /a:5x3 /f:0xff00aa88\n" );
     printf( "    ic d:\\pictures\\mitski\\*.jpg /c /o:mitski_collage.jpg /l:10000 /a:4x5\n" );
+    printf( "    ic cheekface.jpg /s\n" );
+    printf( "    ic cheekface.jpg /s:16 /o:top_16_colors.png\n" );
+    printf( "    ic cheekface.jpg /o:cheeckface_colorized.png /zc:3\n" );
+    printf( "    ic cheekface.jpg /o:cheeckface_posterized.png /p:8 /g\n" );
+    printf( "    ic cfc.jpg /o:out_cfc.png /zc:4,0xfaa616,0x697e94,0xb09e59,0xfdfbe5\n" );
+    printf( "    ic cfc.jpg /o:out_cfc.png /zc:16;inputcolors.jpg\n" );
+    printf( "    ic cfc.jpg /o:out_cfc.png /zb:64;inputcolors.jpg\n" );
+    printf( "    ic cfc.jpg /o:out_cfc.png /zh:8;inputcolors.jpg\n" );
     printf( "  notes:    - -g only applies to the image, not fillcolor. Use /f with identical rgb values for greyscale fills.\n" );
     printf( "            - Exif data is stripped for your protection.\n" );
     printf( "            - fillcolor may or may not start with 0x.\n" );
@@ -1483,6 +2320,7 @@ void Usage()
     printf( "            - <input> can be any WIC-compatible format: heic, tif, png, bmp, cr2, jpg, etc.\n" );
     printf( "            - Output file is always 24bpp unless both input and output are tif and input is 48bpp, which results in 48bpp.\n" );
     printf( "            - Output file type is inferred from the extension specified. JPG is assumed if not obvious.\n" );
+    printf( "            - If an output file is specified with /s, a 128-pixel wide image is created with strips for each color.\n" );
     exit( 0 );
 } //Usage
 
@@ -1564,25 +2402,141 @@ const WCHAR * InferOutputType( WCHAR *ext )
     return L"image/jpeg";
 } //InferOutputType
 
-WCHAR awcInput[ MAX_PATH ];
-WCHAR awcOutput[ MAX_PATH ];
+static DWORD ColorizationColors2[] =
+{
+    0xbfbbaf, 0x905c54,
+};
+
+static DWORD ColorizationColors4[] =
+{
+    0xddd0bd, 0xe38853, 0x7099bf, 0x5b4644,
+};
+
+static DWORD ColorizationColors8[] =
+{
+    0xeea665, 0xeecea1, 0x797874, 0x97b9c6, 0x473d35, 0xd55838, 0xdadce3, 0x4b8edd,
+};
+
+static DWORD ColorizationColors16[] =
+{
+    0xeda48c, 0xf3dea5, 0x5b4f4d, 0x90a093, 0xe8e4e3, 0x7a766e, 0xe67a69, 0x99c4e6,
+    0x61a3e5, 0xf2673e, 0xc0bcb3, 0x342724, 0xb83d2e, 0x4379cf, 0xf0d94d, 0x308c36,
+};
+
+static DWORD ColorizationColors32[] =
+{
+    0xee9b81, 0xf5b1a4, 0xf9785d, 0xf5e8a0, 0xebd8ce, 0xf25d32, 0xf0ede9, 0x9bbde3,
+    0x6b6b6e, 0x89878e, 0x433939, 0xa8a49b, 0xc2bfb8, 0xfbd96b, 0x4e525d, 0x734b41,
+    0xd27469, 0xb4d8f2, 0x261a18, 0xc7301b, 0x7fa0d6, 0x3d9ae8, 0x5c84c9, 0x67b7f2,
+    0x948061, 0xb14d52, 0xf2d026, 0x3069d2, 0x78c196, 0x389964, 0x179e14, 0xfd89fc,
+};
+
+static DWORD ColorizationColors64[] =
+{
+    0xf88f7f, 0xf2a89e, 0xf67464, 0xf6be7c, 0xf0d6a5, 0xf85c43, 0x4f4538, 0xf5e8c8,
+    0x312f31, 0x60645d, 0x9d9593, 0x8d817b, 0x444f55, 0xc7bdb4, 0xf7bfc2, 0xf5f1eb,
+    0xeca354, 0xaba5a9, 0xe94d25, 0x715448, 0x221817, 0xf6f4a1, 0x747272, 0xd9d3ce,
+    0xb22b25, 0xd07a77, 0xdb9590, 0xf6f174, 0xe3e6ea, 0xd35c58, 0x718292, 0x92b6c9,
+    0x6d9abb, 0x477ed0, 0xa94c52, 0x4e9bed, 0xafc6d6, 0xf6e04c, 0x6eaeec, 0x93b8ed,
+    0x51667b, 0xc2ddf2, 0x7c9be2, 0x946553, 0x627ad2, 0xe78721, 0x7cc5f2, 0xc0ad82,
+    0x74b986, 0x3862c4, 0xacd7f8, 0x2b99ee, 0xb49555, 0x9fd3ee, 0xd8310d, 0xf8e819,
+    0x782f2e, 0x92ce9b, 0x359f77, 0x52c8ee, 0x1c71db, 0x1b7d1c, 0x12a70d, 0x06fffe,
+};
+
+static DWORD ColorizationColors128[] =
+{
+    0xf58374, 0xf9958c, 0xf9a5a1, 0xf86a62, 0xeea775, 0xaea8a8, 0xf9ecb3, 0x63676b,
+    0x79848d, 0xbebab8, 0xf85c43, 0xa89b91, 0xf68757, 0xf6be8c, 0x626058, 0x907c72,
+    0xf4f5f2, 0xfacc6e, 0xf9d9cb, 0x4d4f50, 0xf64b2f, 0x948e8c, 0x77757a, 0xf6f179,
+    0x493f41, 0x5d4e37, 0x6cabf2, 0xcfc7c9, 0xefac53, 0xdd8d8a, 0xfbea50, 0xda756e,
+    0x909aa4, 0xf6f599, 0xd45e59, 0xf7d1ae, 0x7d6c5a, 0xf2e3e3, 0xfad899, 0xf7bfc2,
+    0xf8f4d3, 0xedb4ad, 0xe04f16, 0xe1d8d8, 0x5699ea, 0xf66d3f, 0x73524e, 0x96b9f2,
+    0xe0ebf5, 0xdfa19d, 0x4a3b28, 0x83bef6, 0xb6cadb, 0xab271a, 0xa0bbd5, 0x363336,
+    0x95acc7, 0x6a8fe0, 0xa96163, 0x302827, 0xcc7a7d, 0xb4d8f2, 0x4c7edd, 0xcfdbe6,
+    0x5d6dcf, 0xbe4a52, 0xe2dd9f, 0xbe3431, 0x3671d9, 0x46556c, 0x6d97bf, 0x7eaedc,
+    0x5b748a, 0xdb2d0b, 0x4fb5f7, 0x7ec190, 0x849be7, 0x558bbb, 0xe1d6ba, 0xc5b281,
+    0x963e4f, 0x96d2f7, 0xcec49e, 0xbfe3fb, 0xa4976b, 0xfac52b, 0x201c16, 0xa6c9f3,
+    0x329cf2, 0xf3f21b, 0x6ab282, 0x334b57, 0x91d3da, 0x6b8ba9, 0xd08143, 0x7f6532,
+    0x599160, 0x3556c1, 0xe38e2b, 0x3fa8d8, 0x78373d, 0x2289e6, 0x0f0a07, 0x993f27,
+    0x2a364c, 0x1b2429, 0xf48407, 0x41200d, 0x75c6b8, 0xa57a3d, 0x2a110d, 0xaad4ae,
+    0x37af82, 0x386eb4, 0x5dcfea, 0x7e2217, 0xb5ab3c, 0x3a796d, 0x179e14, 0x98d58e,
+    0x19957e, 0x2e9b2a, 0x3b5789, 0x0f7b0e, 0xe63636, 0x0856f4, 0xfd89fc, 0x06fffe,
+};
+
+static DWORD ColorizationColors256[] =
+{
+    0xf86b55, 0x948e8c, 0xf9958a, 0xf87a6d, 0xfaf0b5, 0xfadbcb, 0xf7f3e8, 0x86817d,
+    0xfc5b49, 0x4d464d, 0xf8f4d3, 0x626260, 0x585759, 0xd76e6c, 0xe0d7d2, 0x49423b,
+    0xa59c8b, 0xc7bcbe, 0xaba9ae, 0xfb6941, 0x5d636f, 0xa2a39f, 0x8ec3f3, 0x4fb5f7,
+    0xe9dfe1, 0x5b4a3b, 0x716a69, 0xe3f1f2, 0xf6f5f9, 0xfae49e, 0xe48074, 0xf88c5e,
+    0x6ea6f3, 0xf88b78, 0xf8a398, 0x7ba2e7, 0xda5e5a, 0xf77c82, 0x40352c, 0xf9e0de,
+    0x2e2b2d, 0xf4c090, 0xf24b3b, 0xe48b89, 0xf2f66d, 0xfbd8ae, 0xeca17e, 0xfbd776,
+    0x51a1de, 0xc35b5c, 0xf8fa8c, 0xbcd9f6, 0x90969f, 0x84c28e, 0x727079, 0xf5c8cd,
+    0xfbf59f, 0x3b3538, 0xfab07f, 0x635148, 0xd29292, 0xfac3bf, 0x735754, 0x947f6e,
+    0xb7a69d, 0x475669, 0xe04519, 0xd68278, 0xe79b91, 0xfe8949, 0xabc6db, 0xccbf94,
+    0x828490, 0xd2551d, 0xf2c8a6, 0x507dd8, 0x96a4b4, 0xbec4c9, 0xe7e1a5, 0xf4be5e,
+    0xeeafb2, 0xf6bd78, 0xf9ada8, 0xaa3e21, 0x4081e7, 0xcb322d, 0x7b8c96, 0xfacf84,
+    0xa3b6c5, 0x5290f3, 0xd8d2b5, 0x88adce, 0xfa5630, 0xcfdce8, 0x4e8bce, 0xb61f16,
+    0xd4c7c5, 0x70b27e, 0xe82708, 0xa8d0f6, 0xe88554, 0x271d1c, 0x8b7275, 0x689ddf,
+    0xbdaa7d, 0xf93c1e, 0x8395ad, 0x96b9d6, 0x7f695b, 0xd2dddb, 0x3a6edb, 0xae464f,
+    0x362722, 0xf6ce9b, 0xe7a05e, 0xf99399, 0xf45c6f, 0xdfd69b, 0xf5ab57, 0xdfa19d,
+    0x3b9df4, 0x75c6b8, 0x3c4e5c, 0xbdd2e0, 0xeda86c, 0xaaa168, 0xf0ec81, 0xeb6236,
+    0x618be6, 0x7bbef3, 0x2c63ca, 0x6493bc, 0x91aeef, 0xefd5be, 0xb3b5b7, 0x9cbeeb,
+    0xac8683, 0xc9484f, 0xcc7a7d, 0x994141, 0x866239, 0x727c8b, 0x9b5561, 0x82bee2,
+    0x94d5fe, 0x6d4245, 0xf9ca32, 0x313c4f, 0xbcb4a9, 0xb4696d, 0xb6302f, 0x827761,
+    0x698bae, 0xf8fb4c, 0x4f4220, 0xefaf99, 0x523237, 0x566d7d, 0xa5bbd8, 0xd1eafb,
+    0x248bf4, 0xd2c8d1, 0x3289d3, 0x4f67c7, 0xafdefe, 0xe87927, 0xf8ea18, 0xfcb99f,
+    0x1a73de, 0xfaef35, 0xe4bcbb, 0x4b84b5, 0xd47e36, 0xfeda5d, 0x66bae8, 0xb88653,
+    0xf99aa4, 0x788ddc, 0x687ed3, 0x5db98f, 0x34b07b, 0x6c693c, 0xaedceb, 0x6ec5ff,
+    0xef9c3d, 0xf2571e, 0x6c8194, 0x9d6355, 0xf6dd53, 0xcab6ab, 0xfbe909, 0x7b3128,
+    0x75a0c3, 0xf9acc1, 0x29363f, 0x645423, 0xe9ebc5, 0x93d3e0, 0x96b9fd, 0x495c54,
+    0x8ecfc6, 0x60758d, 0xb05f3b, 0xdfb1ad, 0xebf199, 0x8a4452, 0x3b200f, 0x5d9d68,
+    0x18a108, 0x261012, 0x3c8967, 0x666cda, 0x98d58e, 0x8f2b14, 0x95894d, 0x3e5682,
+    0x171717, 0x1d232f, 0xaeab40, 0x20676b, 0x3556c1, 0xf67800, 0xaad4ae, 0xf6b712,
+    0x0d0d0f, 0x648359, 0xcbc563, 0x19957e, 0x8f96e7, 0x3c130f, 0x5d9954, 0x090504,
+    0x842640, 0x378e2b, 0x37b3d9, 0x210909, 0x691d29, 0x4d799e, 0x3562a6, 0x037602,
+    0x51e5ef, 0xb1bdef, 0xc5b627, 0x29554a, 0x281b08, 0xfd89fc, 0x06fffe, 0x182a14,
+    0x232c67, 0x034afe, 0x187218, 0x7fffff, 0x00a637, 0xcfcaff, 0x8bfe02, 0xf0335b,
+};
 
 extern "C" int wmain( int argc, WCHAR * argv[] )
 {
+    static WCHAR awcInput[ MAX_PATH ];
+    static WCHAR awcOutput[ MAX_PATH ];
+
     long long totalTime = 0;
     CTimed timedTotal( totalTime );
 
     if ( argc < 2 )
+        Usage( "too few arguments" );
+
+    HRESULT hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't initialize COM: %#x\n", hr );
         Usage();
+    }
+
+    hr = CoCreateInstance( CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                           __uuidof( IWICImagingFactory ),
+                           (void **) g_IWICFactory.GetAddressOf() );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't create WIC imaging factory: %#x\n", hr );
+        Usage();
+    }
 
     awcInput[0] = 0;
     awcOutput[0] = 0;
     bool generateCollage = false;
     bool randomizeCollage = false;
     bool runtimeInfo = false;
+    bool showColors = false;
+    int showColorCount = 64;
     bool makeGreyscale = false;
     bool lowQualityOutput = false;
     int posterizeLevel = 0;  // 0 means none
+    ColorizationData * colorizationData = 0; // null means none
     int waveMethod = 0;      // 0 means none; don't create a WAV file
     int longEdge = 0;
     int fillColor = 0xff << 24; // black, non-transparent
@@ -1591,6 +2545,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     double tileProbability = 1.0;
     bool enableTracing = false;
     bool clearTraceFile = false;
+
+    ColorizationData cd;
 
     for ( int a = 1; a < argc; a++ )
     {
@@ -1603,7 +2559,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             if ( L'a' == p )
             {
                 if ( L':' != parg[2] )
-                    Usage();
+                    Usage( "malformed argument -- expecting a :" );
 
                 aspectRatio = ParseAspectRatio( parg + 3 );
             }
@@ -1612,15 +2568,12 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             else if ( L'f' == p )
             {
                 if ( L':' != parg[2] )
-                    Usage();
+                    Usage( "malformed argument -- expecting a :" );
 
                int parsed = swscanf_s( parg + 3, L"%x", & fillColor );
 
                if ( 0 == parsed )
-               {
-                   printf( "can't parse fill color\n" );
-                   Usage();
-               }
+                   Usage( "can't parse fill color" );
             }
             else if ( L'g' == p )
                 makeGreyscale = true;
@@ -1629,7 +2582,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             else if ( L'l' == p )
             {
                 if ( L':' != parg[2] )
-                    Usage();
+                    Usage( "malformed argument -- expecting a :" );
 
                 longEdge = _wtoi( parg + 3 );
 
@@ -1642,19 +2595,19 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             else if ( L'o' == p )
             {
                 if ( L':' != parg[2] )
-                    Usage();
+                    Usage( "malformed argument -- expecting a :" );
 
                 _wfullpath( awcOutput, parg + 3, _countof( awcOutput ) );
             }
             else if ( L'p' == p )
             {
                 if ( L':' != parg[2] )
-                    Usage();
+                    Usage( "malformed argument -- expecting a :" );
 
                 posterizeLevel = _wtoi( parg + 3 );
-                if ( posterizeLevel < 0 || posterizeLevel > 35 )
+                if ( posterizeLevel < 1 || posterizeLevel > 256 )
                 {
-                    printf( "invalid posterization level %d\n", posterizeLevel );
+                    printf( "invalid posterization level %d; must be 1..256\n", posterizeLevel );
                     Usage();
                 }
             }
@@ -1662,17 +2615,27 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                 lowQualityOutput = true;
             else if ( L'r' == p )
                 randomizeCollage = true;
+            else if ( L's' == p )
+            {
+                showColors = true;
+
+                if ( L':' == parg[2] )
+                    showColorCount = _wtoi( parg + 3 );
+
+                if ( showColorCount < 0 || showColorCount > 256 )
+                    Usage( "show color count must be in range 1..256" );
+            }
             else if ( L't' == p )
             {
                 if ( 0 != parg[2] )
-                    Usage();
+                    Usage( "unexpected characters after argument" );
                 enableTracing = true;
                 clearTraceFile = ( L'T' == parg[1] );
             }
             else if ( L'w' == p )
             {
                 if ( L':' != parg[2] )
-                    Usage();
+                    Usage( "malformed argument -- expecting a :" );
 
                 waveMethod = _wtoi( parg + 3 );
                 if ( waveMethod < 0 || waveMethod > 10 )
@@ -1681,28 +2644,182 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                     Usage();
                 }
             }
-            else
-                Usage();
+            else if ( L'z' == p )
+            {
+                WCHAR const * pnext = parg + 2;
+                if ( L'b' == *pnext )
+                    cd.mapping = mapBrightness;
+                else if ( 's' == *pnext )
+                    cd.mapping = mapSaturation;
+                else if ( 'h' == *pnext )
+                    cd.mapping = mapHue;
+                else if ( 'g' == *pnext )
+                    cd.mapping = mapGradient;
+                else if ( 'c' == *pnext )
+                    cd.mapping = mapColor;
+                else
+                    Usage( "invalid /z flag specified" );
+
+                pnext++;
+                if ( L':' != *pnext )
+                    Usage( "colon not found in /z flag" );
+
+                posterizeLevel = _wtoi( pnext + 1 );
+                if ( posterizeLevel < 1 || posterizeLevel > 256 )
+                {
+                    printf( "invalid colorization posterization level %d; must be 1-256\n", posterizeLevel );
+                    Usage();
+                }
+
+                colorizationData = &cd;
+
+                WCHAR const *semi = wcschr( parg, L';' );
+                if ( semi )
+                {
+                    static WCHAR awcColorFile[ MAX_PATH ];
+                    _wfullpath( awcColorFile, semi + 1, _countof( awcColorFile ) );
+                    DWORD attr = GetFileAttributesW( awcColorFile );
+                    if ( INVALID_FILE_ATTRIBUTES == attr )
+                        Usage( "can't find /z color file" );
+
+                    cd.bgrdata.clear();
+                    ShowColors( awcColorFile, posterizeLevel, cd.bgrdata, true, 0 );
+                }
+                else
+                {
+                    WCHAR const *comma = wcschr( parg, L',' );
+    
+                    if ( comma )
+                    {
+                        // parse a list of colors
+
+                        cd.bgrdata.clear();
+    
+                        do
+                        {
+                            comma++;
+                            DWORD color;
+                            int parsed = swscanf_s( comma, L"%x", & color );
+                            if ( 0 == parsed )
+                                Usage( "can't parse color mapping color" );
+                            cd.bgrdata.push_back( color );
+                            comma = wcschr( comma, L',' );
+                        } while ( comma );
+    
+                        if ( cd.bgrdata.size() != posterizeLevel )
+                            Usage( "the /z: color count isn't the same as the number of colors specified" );
+                    }
+                    else
+                    {
+                        // use the built-in table
+
+                        int countBuiltIn = 0;
+                        DWORD * pBuiltInArray = NULL;
+
+                        if ( posterizeLevel <= 2 )
+                        {
+                            countBuiltIn = 2;
+                            pBuiltInArray = ColorizationColors2;
+                        }
+                        else if ( posterizeLevel <= 4 )
+                        {
+                            countBuiltIn = 4;
+                            pBuiltInArray = ColorizationColors4;
+                        }
+                        else if ( posterizeLevel <= 8 )
+                        {
+                            countBuiltIn = 8;
+                            pBuiltInArray = ColorizationColors8;
+                        }
+                        else if ( posterizeLevel <= 16 )
+                        {
+                            countBuiltIn = 16;
+                            pBuiltInArray = ColorizationColors16;
+                        }
+                        else if ( posterizeLevel <= 32 )
+                        {
+                            countBuiltIn = 32;
+                            pBuiltInArray = ColorizationColors32;
+                        }
+                        else if ( posterizeLevel <= 64 )
+                        {
+                            countBuiltIn = 64;
+                            pBuiltInArray = ColorizationColors64;
+                        }
+                        else if ( posterizeLevel <= 128 )
+                        {
+                            countBuiltIn = 128;
+                            pBuiltInArray = ColorizationColors128;
+                        }
+                        else // anything greater is mapped to 256
+                        {
+                            countBuiltIn = 256;
+                            pBuiltInArray = ColorizationColors256;
+                        }
+
+                        cd.bgrdata.resize( countBuiltIn );
+
+                        for ( int c = 0; c < countBuiltIn; c++ )
+                           cd.bgrdata[ c ] = pBuiltInArray[ c ];
+                    }
+                }
+            }
         }
         else if ( 0 != awcInput[0] )
-            Usage();
+            Usage( "input file specified twice" );
         else
             _wfullpath( awcInput, parg, _countof( awcInput ) );
     }
 
     tracer.Enable( enableTracing, L"ic.txt", clearTraceFile );
 
-    if ( 0 == awcInput[0] || 0 == awcOutput[0] )
+    // Create optimized data structures for specific color mapping scenarios
+
+    if ( mapColor == cd.mapping || mapGradient == cd.mapping )
+        qsort( cd.bgrdata.data(), cd.bgrdata.size(), sizeof DWORD, compare_brightness );
+
+    if ( mapColor == cd.mapping )
     {
-        printf( "input and/or output files not specified\n" );
-        Usage();
+        cd.kdtree.reset( new KDTreeBRG( cd.bgrdata.size() ) );
+
+        for ( int i = 0; i < cd.bgrdata.size(); i++ )
+            cd.kdtree->Insert( cd.bgrdata[ i ] );
+    }
+    else  if ( mapBrightness == cd.mapping || mapHue == cd.mapping || mapSaturation == cd.mapping )
+    {
+        qsort( cd.bgrdata.data(), cd.bgrdata.size(), sizeof DWORD,
+               mapHue == cd.mapping ? compare_hue :
+               mapSaturation == cd.mapping ? compare_saturation :
+               compare_brightness );
+
+        // calcuate the HSV data for the rgb data, if any
+    
+        cd.hsvdata.resize( cd.bgrdata.size() );
+    
+        for ( int i = 0; i < cd.bgrdata.size(); i++ )
+        {
+            int h,s,v;
+            BGRToHSV( cd.bgrdata[ i ], h, s, v );
+
+            if ( mapHue == cd.mapping )
+                cd.hsvdata[ i ] = h;
+            else if ( mapSaturation == cd.mapping )
+                cd.hsvdata[ i ] = s;
+            else if ( mapBrightness == cd.mapping )
+                cd.hsvdata[ i ] = v;
+        }
+
+        #ifndef NDEBUG
+        for ( int z = 0; z < cd.hsvdata.size() - 1; z++ )
+            assert( cd.hsvdata[ z ] <= cd.hsvdata[ z + 1 ] );
+        #endif
     }
 
+    if ( 0 == awcInput[0] || ( 0 == awcOutput[0] && !showColors ) )
+        Usage( "input and/or output files not specified" );
+
     if ( waveMethod > 0 && generateCollage )
-    {
-        printf( "can't generate wav files when generating a collage\n" );
-        Usage();
-    }
+        Usage( "can't generate wav files when generating a collage" );
 
     if ( !generateCollage )
     {
@@ -1714,31 +2831,22 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
         }
     }
 
-    const WCHAR * outputMimetype = InferOutputType( PathFindExtension( awcOutput ) );
+    const WCHAR * outputMimetype = awcOutput[0] ? InferOutputType( PathFindExtension( awcOutput ) ) : 0;
 
     tracer.Trace( "input: %ws\n", awcInput );
     tracer.Trace( "output: %ws\n", awcOutput );
     tracer.Trace( "output type: %ws\n", outputMimetype );
     tracer.Trace( "long edge: %d\n", longEdge );
 
-    HRESULT hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
-    if ( FAILED( hr ) )
+    if ( showColors )
     {
-        printf( "can't initialize COM: %#x\n", hr );
-        return 0;
-    }
-
-    hr = CoCreateInstance( CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
-                           __uuidof( IWICImagingFactory ),
-                           (void **) g_IWICFactory.GetAddressOf() );
-    if ( FAILED( hr ) )
-    {
-        printf( "can't create WIC imaging factory: %#x\n", hr );
+        cd.bgrdata.clear();
+        hr = ShowColors( awcInput, showColorCount, cd.bgrdata, true, awcOutput[0] ? awcOutput : 0, outputMimetype );
     }
     else if ( generateCollage )
     {
-        hr = GenerateCollage( awcInput, awcOutput, longEdge, posterizeLevel, makeGreyscale, aspectRatio, fillColor, outputMimetype,
-                              randomizeCollage, lowQualityOutput );
+        hr = GenerateCollage( awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
+                              aspectRatio, fillColor, outputMimetype, randomizeCollage, lowQualityOutput );
 
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
@@ -1747,7 +2855,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     }
     else
     {
-        hr = ConvertImage( awcInput, awcOutput, longEdge, waveMethod, posterizeLevel, makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput );
+        hr = ConvertImage( awcInput, awcOutput, longEdge, waveMethod, posterizeLevel, colorizationData, makeGreyscale,
+                           aspectRatio, fillColor, outputMimetype, lowQualityOutput );
     
         if ( SUCCEEDED( hr ) )
             printf( "output written successfully: %ws\n", awcOutput );
@@ -1773,15 +2882,49 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             PrintStat( "final working set:", pmc.WorkingSetSize );
         }
 
+        if ( 0 != g_ShowColorsAllTime )
+        {
+            PrintStat( "show colors total:", g_ShowColorsAllTime / CTimed::NanoPerMilli() );
+
+            if ( 0 != g_ShowColorsOpenTime )
+                PrintStat( "  open:", g_ShowColorsOpenTime / CTimed::NanoPerMilli() );
+
+            if ( 0 != g_ShowCopyPixelsTime )
+                PrintStat( "  copy pixels:", g_ShowCopyPixelsTime / CTimed::NanoPerMilli() );
+            
+            PrintStat( "  copy colors", g_ShowColorsCopyTime / CTimed::NanoPerMilli() );
+            PrintStat( "  sort:", g_ShowColorsSortTime / CTimed::NanoPerMilli() );
+            PrintStat( "  find unique:", g_ShowColorsUniqueTime / CTimed::NanoPerMilli() );
+            PrintStat( "  cluster prep:", g_ShowColorsClusterPrepTime / CTimed::NanoPerMilli() );
+
+            if ( 0 != g_ShowColorsClusterTime );
+                PrintStat( "  color clustering:", g_ShowColorsClusterTime / CTimed::NanoPerMilli() );
+
+            if ( 0 != g_ShowColorsPaletteTime )
+                PrintStat( "  palette file:", g_ShowColorsPaletteTime / CTimed::NanoPerMilli() );
+        }
+
         if ( generateCollage )
         {
             PrintStat( "collage prep:", g_CollagePrepTime / CTimed::NanoPerMilli() );
             PrintStat( "collage stitch:", g_CollageStitchTime / CTimed::NanoPerMilli() );
             PrintStat( "  flood fill:", g_CollageStitchFloodTime / CTimed::NanoPerMilli() );
-            PrintStat( "  copy pixels:", g_CollageStitchCopyPixelsTime / CTimed::NanoPerMilli() );
+            PrintStat( "  read pixels:", g_CollageStitchCopyPixelsTime / CTimed::NanoPerMilli() );
             PrintStat( "  draw:", g_CollageStitchDrawTime / CTimed::NanoPerMilli() );
             PrintStat( "collage write:", g_CollageWriteTime / CTimed::NanoPerMilli() );
         }
+
+        if ( 0 != g_CopyPixelsTime )
+            PrintStat( "read pixels:", g_CopyPixelsTime / CTimed::NanoPerMilli() );
+
+        if ( 0 !=  g_PosterizePixelsTime )
+            PrintStat( "posterize image:", g_PosterizePixelsTime / CTimed::NanoPerMilli() );
+
+        if ( 0 != g_ColorizeImageTime )
+            PrintStat( "colorize image:", g_ColorizeImageTime / CTimed::NanoPerMilli() );
+
+        if ( 0 != g_WritePixelsTime )
+            PrintStat( "write pixels:", g_WritePixelsTime / CTimed::NanoPerMilli() );
 
         PrintStat( "elapsed time:", totalTime / CTimed::NanoPerMilli() );
 
@@ -1804,4 +2947,3 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     tracer.Shutdown();
     return 0;
 } //wmain
-
