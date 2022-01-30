@@ -11,9 +11,10 @@
 // with any color ordering provided you're consistent on input/output.
 //
 
+#include <stdlib.h>
 #include <vector>
 
-class KDTreeBRG
+class KDTreeBGR
 {
     private:
 
@@ -23,6 +24,14 @@ class KDTreeBRG
         {
             ushort left, right;
             byte R, G, B;
+
+            int Distance( int r, int g, int b )
+            {
+                int distR = (int) R - r;
+                int distG = (int) G - g;
+                int distB = (int) B - b;
+                return distR * distR + distG * distG + distB * distB;
+            }
         }; //KDNode   
         
         struct RectRGB
@@ -105,13 +114,7 @@ class KDTreeBRG
             //printf( "nearest neighbor %d, level %d\n", kd, level );
     
             KDNode & kdn = nodeArray[ kd ];
-    
-            int diff = kdn.R - ss.targetR;
-            int kdToTarget = diff * diff;
-            diff = kdn.G - ss.targetG;
-            kdToTarget += diff * diff;
-            diff = kdn.B - ss.targetB;
-            kdToTarget += diff * diff;
+            int kdToTarget = kdn.Distance( ss.targetR, ss.targetG, ss.targetB );
     
             //printf( "  comparing target %#.2x%.2x%.2x to node %#.2x%.2x%.2x, distance %d\n", targetB, targetG, targetR, kdn.B, kdn.G, kdn.R, kdToTarget );
 
@@ -156,15 +159,15 @@ class KDTreeBRG
                 if ( 0 != kdn.right )
                 {
                     int f = ( ss.targetR > rightRect.minR ) ? ( ss.targetR > rightRect.maxR ) ? rightRect.maxR : ss.targetR : rightRect.minR;
-                    diff = f - ss.targetR;
+                    int diff = f - (int) ss.targetR;
                     int sqrDistance = diff * diff;
     
                     f = ( ss.targetG > rightRect.minG ) ? ( ss.targetG > rightRect.maxG ) ? rightRect.maxG : ss.targetG : rightRect.minG;
-                    diff = f - ss.targetG;
+                    diff = f - (int) ss.targetG;
                     sqrDistance += diff * diff;
     
                     f = ( ss.targetB > rightRect.minB ) ? ( ss.targetB > rightRect.maxB ) ? rightRect.maxB : ss.targetB : rightRect.minB;
-                    diff = f - ss.targetB;
+                    diff = f - (int) ss.targetB;
                     sqrDistance += diff * diff;
     
                     if ( sqrDistance < ss.bestDistanceSq )
@@ -180,15 +183,15 @@ class KDTreeBRG
                 if ( 0 != kdn.left )
                 {
                     int f = ( ss.targetR > leftRect.minR ) ? ( ss.targetR > leftRect.maxR ) ? leftRect.maxR : ss.targetR : leftRect.minR;
-                    diff = f - ss.targetR;
+                    int diff = f - (int) ss.targetR;
                     int sqrDistance = diff * diff;
     
                     f = ( ss.targetG > leftRect.minG ) ? ( ss.targetG > leftRect.maxG ) ? leftRect.maxG : ss.targetG : leftRect.minG;
-                    diff = f - ss.targetG;
+                    diff = f - (int) ss.targetG;
                     sqrDistance += diff * diff;
     
                     f = ( ss.targetB > leftRect.minB ) ? ( ss.targetB > leftRect.maxB ) ? leftRect.maxB : ss.targetB : leftRect.minB;
-                    diff = f - ss.targetB;
+                    diff = f - (int) ss.targetB;
                     sqrDistance += diff * diff;
     
                     if ( sqrDistance < ss.bestDistanceSq )
@@ -199,7 +202,7 @@ class KDTreeBRG
 
     public:
     
-        KDTreeBRG( int count )
+        KDTreeBGR( int count )
         {
             assert( count < 65535 );
     
@@ -209,7 +212,7 @@ class KDTreeBRG
             ZeroMemory( nodeArray.data(), ( count + 1 ) * sizeof KDNode );
             treeHead = 0;
             nodesAllocated = 1;
-        } //KDTreeBRG
+        } //KDTreeBGR
 
         int NodeCount()
         {
@@ -275,5 +278,84 @@ class KDTreeBRG
                         nodeArray[i].B, nodeArray[i].G, nodeArray[i].R );
             }
         } //ShowTree
-}; //KDTreeBRG
+
+        #ifndef NDEBUG
+        static bool UnitTest()
+        {
+            // add a somewhat random number of random colors to a tree
+
+            srand( time( 0 ) );
+            const DWORD items = 3000 + ( rand() % 1000 );
+            KDTreeBGR kdtree( items );
+
+            for ( DWORD i = 0; i < items; i++ )
+            {
+                int r = rand() % 256;
+                int g = rand() % 256;
+                int b = rand() % 256;
+
+                // don't add duplicates
+
+                bool found = false;
+                for ( DWORD t = 1; t <= kdtree.NodeCount(); t++ )
+                {
+                    if ( 0 == kdtree.nodeArray[ t ].Distance( r, g, b ) )
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if ( !found )
+                    kdtree.Insert( r, g, b );
+            }
+
+            // Search for random colors using the tree and a linear search. Ensure the best distance for each is
+            // the same. The color found may be different; that's OK, provided the distance is identical.
+
+            for ( int t = 0; t < 5000; t++ )
+            {
+                int r = rand() % 256;
+                int g = rand() % 256;
+                int b = rand() % 256;
+
+                DWORD idFound;
+                int found = kdtree.Nearest( r, g, b, idFound );
+                int distanceFound = kdtree.nodeArray[ idFound + 1 ].Distance( r, g, b );
+
+                // do a linear search and compare the results. Slot 0 is empty.
+
+                int idBest = 0;
+                int distanceBest = INT_MAX;
+
+                for ( ushort item = 1; item <= kdtree.NodeCount(); item++ )
+                {
+                    int distance = kdtree.nodeArray[ item ].Distance( r, g, b );
+
+                    if ( distance < distanceBest )
+                    {
+                        idBest = item;
+                        distanceBest = distance;
+                    }
+                }
+
+                if ( distanceFound != distanceBest )
+                {
+                    printf( "kdtree unit test failure. items in the tree %d\n", kdtree.nodesAllocated );
+                    printf( "linear search found a different best answer than the tree.\n" );
+                    printf( "    test case %d, idFound %d, distanceFound %d, idBest %d, distanceBest %d\n",
+                            t, idFound, distanceFound, idBest, distanceBest );
+                    printf( "    looked for            r %#.2x, g %#.2x, b %#.2x\n", r, g, b );
+                    KDNode & nodeFound = kdtree.nodeArray[ idFound + 1 ];
+                    printf( "    tree found            r %#.2x, g %#.2x, b %#.2x\n", nodeFound.R, nodeFound.G, nodeFound.B );
+                    KDNode & nodeBest = kdtree.nodeArray[ idBest ];
+                    printf( "    linear search found   r %#.2x, g %#.2x, b %#.2x\n", nodeBest.R, nodeBest.G, nodeBest.B );
+                    return false;
+                }
+            }
+
+            return true;
+        } //UnitTest
+        #endif
+}; //KDTreeBGR
 

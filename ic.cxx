@@ -94,7 +94,7 @@ struct ColorizationData
     ColorMapping mapping;
     vector<DWORD> bgrdata;
     vector<byte> hsvdata;        // may contain h, s, or v depending on mapping
-    unique_ptr<KDTreeBRG> kdtree;
+    unique_ptr<KDTreeBGR> kdtree;
 };
 
 const int sixtyDegrees = 42; // 60 out of 360, and 42 out of 256 (42 * 6 = 252)
@@ -2504,6 +2504,11 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     static WCHAR awcInput[ MAX_PATH ];
     static WCHAR awcOutput[ MAX_PATH ];
 
+    #ifndef NDEBUG
+        for ( int testing = 0; testing < 3; testing++ )
+            assert( KDTreeBGR::UnitTest() );
+    #endif
+
     long long totalTime = 0;
     CTimed timedTotal( totalTime );
 
@@ -2780,7 +2785,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
 
     if ( mapColor == cd.mapping )
     {
-        cd.kdtree.reset( new KDTreeBRG( cd.bgrdata.size() ) );
+        cd.kdtree.reset( new KDTreeBGR( cd.bgrdata.size() ) );
 
         for ( int i = 0; i < cd.bgrdata.size(); i++ )
             cd.kdtree->Insert( cd.bgrdata[ i ] );
