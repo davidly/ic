@@ -338,7 +338,7 @@ HRESULT ConvertBitmapTo24bppBGROr48bppRGB( ComPtr<IWICBitmapSource> & source, bo
 
     if ( !force24bppBGR && ( GUID_WICPixelFormat48bppRGB == pixelFormat ) )
     {
-        printf( "bitmap source is 48bppRGB and that's OK!\n" );
+        //printf( "bitmap source is 48bppRGB and that's OK!\n" );
         return S_OK;
     }
 
@@ -2683,7 +2683,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                         Usage( "can't find /z color file" );
 
                     cd.bgrdata.clear();
-                    ShowColors( awcColorFile, posterizeLevel, cd.bgrdata, true, 0 );
+                    ShowColors( awcColorFile, posterizeLevel, cd.bgrdata, false, 0 );
                 }
                 else
                 {
