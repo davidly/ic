@@ -1068,7 +1068,7 @@ template <class T> void ColorizeImage( T * image, int stride, int width, int hei
     const int maxT = ( 1 << sizeof( T ) * 8 ) - 1;
     const int groupSpan = ( maxT + 1 ) / posterizeLevel;
     const DWORD count = colorizationData->bgrdata.size();
-    printf( "colorizing posterize %d, colors %zd, method %d\n", posterizeLevel, colorizationData->bgrdata.size(), colorizationData->mapping );
+    //printf( "colorizing posterize %d, colors %zd, method %d\n", posterizeLevel, colorizationData->bgrdata.size(), colorizationData->mapping );
 
     //for ( int y = 0; y < height; y++ )
     parallel_for ( 0, height, [&] ( int y )
@@ -2282,16 +2282,16 @@ void Usage( char * message = 0 )
     printf( "             -p:x              Posterization level. 1..256 inclusive, Default 0 means none. # colors per channel.\n" );
     printf( "             -q                Sacrifice image quality to produce a smaller JPG output file (4:2:2 not 4:4:4, 60%% not 100%%).\n" );
     printf( "             -r                Randomize the layout of images in a collage.\n" );
-    printf( "             -s:x              Clusters color groups and shows most common X colors, Default is 64\n" );
+    printf( "             -s:x              Clusters color groups and shows most common X colors, Default is 64, 1-256 valid.\n" );
     printf( "             -t                Enable debug tracing to ic.txt. Use -T to start with a fresh ic.txt\n" );
     printf( "             -w:x              Create a WAV file based on the image using methods 1..10. (prototype)\n" );
     printf( "             -zc:x             Colorization. Works like posterization (1-256), but maps to a built-in color table.\n" );
     printf( "             -zc:x,color1,...  Specify x colors that should be used. See example below.\n" );
     printf( "             -zc:x;filename    Use centroids from x color clusters taken from the input file.\n" );
-    printf( "             -zb               Same as -z, but maps colors by matching brightness instead of color.\n" );
-    printf( "             -zs               Same as -z, but maps colors by matching saturation instead of color.\n" );
-    printf( "             -zh               Same as -z, but maps colors by matching hue instead of color.\n" );
-    printf( "             -zg               Same as -z, but maps colors by matching brightness gradient instead of color.\n" );
+    printf( "             -zb               Same as -zc, but maps colors by matching brightness instead of color.\n" );
+    printf( "             -zs               Same as -zc, but maps colors by matching saturation instead of color.\n" );
+    printf( "             -zh               Same as -zc, but maps colors by matching hue instead of color.\n" );
+    printf( "             -zg               Same as -zc, but maps colors by matching brightness gradient instead of color.\n" );
     printf( "  sample usage: (arguments can use - or /)\n" );
     printf( "    ic picture.jpg /o:newpicture.jpg /l:800\n" );
     printf( "    ic picture.jpg /p o:newpicture.jpg /l:800\n" );
