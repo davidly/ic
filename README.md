@@ -1,7 +1,7 @@
 # IC
 ### Image Conversion command-line app for Windows
 
-Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS data to the output image. The app also creates simple collages of images.
+Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS location to the output image. The app also creates simple collages of images.
 
 To build on Windows:
     
