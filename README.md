@@ -57,7 +57,7 @@ usage: ic input /o:output
     
     - -g only applies to the image, not fillcolor. Use /f with identical rgb values for greyscale fills.
     - Exif data is stripped for your protection.
-    - fillcolor may or may not start with 0x.
+    - fillcolor is always hex, and may or may not start with 0x.
     - Both -a and -l are aspirational for collages. Aspect ratio and long edge may change to accomodate content.
     - If a precise collage aspect ratio or long edge are required, run the app twice; on a single image it's exact.
     - Writes as high a quality of JPG as it can: 1.0 quality and 4:4:4
