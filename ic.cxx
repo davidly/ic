@@ -44,17 +44,17 @@ ComPtr<IWICImagingFactory> g_IWICFactory;
 long long g_CollagePrepTime = 0;
 long long g_CollageStitchTime = 0;
 long long g_CollageStitchFloodTime = 0;
-long long g_CollageStitchCopyPixelsTime = 0;
+long long g_CollageStitchReadPixelsTime = 0;
 long long g_CollageStitchDrawTime = 0;
 long long g_CollageWriteTime = 0;
 long long g_ColorizeImageTime = 0;
 long long g_ShowColorsAllTime = 0;
 long long g_ShowColorsOpenTime = 0;
-long long g_ShowCopyPixelsTime = 0;
+long long g_ShowReadPixelsTime = 0;
 long long g_ShowColorsClusterTime = 0;
 long long g_ShowColorsPaletteTime = 0;
 long long g_PosterizePixelsTime = 0;
-long long g_CopyPixelsTime = 0;
+long long g_ReadPixelsTime = 0;
 long long g_WritePixelsTime = 0;
 long long g_ShowColorsCopyTime = 0;
 long long g_ShowColorsSortTime = 0;
@@ -1008,6 +1008,7 @@ DWORD FindNearestColor( int r, int g, int b, ColorizationData & cd, int posteriz
     {
         DWORD idnearest;
         cd.kdtree->Nearest( r, g, b, idnearest );
+
         assert( idnearest < posterizeLevel );
         return idnearest;
     }
@@ -1436,7 +1437,7 @@ HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & cen
     }
 #endif
 
-    CTimed showCopyPixels( g_ShowCopyPixelsTime );
+    CTimed showReadPixels( g_ShowReadPixelsTime );
     int bppIn = g_BitsPerPixel;
     int strideIn = StrideInBytes( width, bppIn );
 
@@ -1444,7 +1445,7 @@ HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & cen
     vector<byte> bufferIn( cbIn );
 
     hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.data() );
-    showCopyPixels.Complete();
+    showReadPixels.Complete();
     if ( FAILED( hr ) )
     {
         printf( "ShowColors() failed to read input pixels in CopyPixels() %#x\n", hr );
@@ -1556,7 +1557,7 @@ HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & cen
             // the width in %#06x for wsprintf is different than printf. printf includes the 0x in the
             // width and wsprintf does not.
 
-            static WCHAR awcColor[ 20 ];
+            static WCHAR awcColor[ 30 ] = {0};
             wsprintf( awcColor, L"%#06x", centroids[ c ] );
             TextOut( memdc, 1, 1 + yoffset, awcColor, wcslen( awcColor ) );
 
@@ -1615,8 +1616,8 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
     vector<byte> bufferIn( cbIn );
     
     {
-        CTimed timed( g_CollageStitchCopyPixelsTime );
-        CTimed timedCopyPixels( g_CopyPixelsTime );
+        CTimed timed( g_CollageStitchReadPixelsTime );
+        CTimed timedReadPixels( g_ReadPixelsTime );
 
         // Almost all of the runtime of this app will be in source->CopyPixels(), where the input file is parsed
 
@@ -1643,20 +1644,20 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
         assert( 0 != posterizeLevel );
 
         if ( 24 == bppOut )
-            ColorizeImage( pOut, strideOut, width, height, posterizeLevel, colorizationData );
+            ColorizeImage( pbOutBase, strideOut, width, height, posterizeLevel, colorizationData );
         else
-            ColorizeImage( (USHORT *) pOut, strideOut, width, height, posterizeLevel, colorizationData );
+            ColorizeImage( (USHORT *) pbOutBase, strideOut, width, height, posterizeLevel, colorizationData );
     }
     else  if ( 0 != posterizeLevel )
     {
         if ( 24 == bppOut )
-            PosterizeImage( pOut, strideOut, width, height, posterizeLevel );
+            PosterizeImage( pbOutBase, strideOut, width, height, posterizeLevel );
         else
-            PosterizeImage( (USHORT *) pOut, strideOut, width, height, posterizeLevel );
+            PosterizeImage( (USHORT *) pbOutBase, strideOut, width, height, posterizeLevel );
     }
 
     if ( 0 != waveMethod )
-       CreateWAVFromImage( waveMethod, pwcWAVBase, pOut, strideOut, width, height, bppOut );
+       CreateWAVFromImage( waveMethod, pwcWAVBase, pbOutBase, strideOut, width, height, bppOut );
 
     return S_OK;
 } //DrawImage
@@ -1906,9 +1907,119 @@ HRESULT GetBitmapDimensions( WCHAR const * path, UINT & width, UINT & height )
     return hr;
 } //GetBitmapDimensions
 
-HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<BitmapDimensions> & dimensions, int imagesWide, int imagesHigh,
-                      int cellDX, int cellDY, int stitchDX, int stitchDY, int fillColor, int waveMethod, int posterizeLevel,
-                      ColorizationData * colorizationData, bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput )
+HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<int> & sortedIndexes,
+                       vector<int> & columnsToUse, vector<int> & yOffsets,
+                       vector<BitmapDimensions> & dimensions, int columns,
+                       int targetHeight, int targetWidth, int spacing, int imageWidth, int fillColor,
+                       int posterizeLevel, ColorizationData * colorizationData, bool makeGreyscale,
+                       WCHAR const * outputMimetype, bool lowQualityOutput )
+{
+    CTimed timeStitch( g_CollageStitchTime );
+    ComPtr<IWICBitmapEncoder> encoder;
+    ComPtr<IWICBitmapFrameEncode> bitmapFrameEncode;
+    HRESULT hr = CreateWICEncoder( pwcOutput, encoder, bitmapFrameEncode, outputMimetype, lowQualityOutput );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't create a wic encoder: error %#x\n", hr );
+        return hr;
+    }
+    
+    hr = bitmapFrameEncode->SetSize( targetWidth, targetHeight );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to set encoder frame size %#x\n", hr );
+        return hr;
+    }
+    
+    WICPixelFormatGUID formatRequest = g_GuidPixelFormat;
+    hr = bitmapFrameEncode->SetPixelFormat( & formatRequest );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to set encoder pixel format %#x\n", hr );
+        return hr;
+    }
+    
+    if ( formatRequest != g_GuidPixelFormat )
+    {
+        printf( "didn't get the pixel format requested for writing\n" );
+        return E_FAIL;
+    }
+    
+    int strideOut = StrideInBytes( targetWidth, g_BitsPerPixel );
+    int cbOut = strideOut * targetHeight;
+    vector<byte> bufferOut( cbOut );
+    
+    {
+        CTimed timedFlood( g_CollageStitchFloodTime );
+    
+        FloodFill( bufferOut.data(), targetWidth, targetHeight, fillColor );
+    }
+
+    int imageCount = pathArray.Count();
+
+    //for ( int i = 0; i < imageCount; i++ )
+    parallel_for( 0, imageCount, [&] ( int i )
+    {
+        int si = sortedIndexes[ i ];
+        int columnToUse = columnsToUse[ si ];
+        int imageHeight = round( (double) imageWidth / (double) dimensions[ si ].width * (double) dimensions[ si ].height );
+
+        ComPtr<IWICBitmapSource> source;
+        ComPtr<IWICBitmapFrameDecode> frame;
+        HRESULT hr = LoadWICBitmap( pathArray[ si ].pwcPath, source, frame, true );
+        if ( FAILED( hr ) )
+            printf( "can't open bitmap, error: %#x\n", hr );
+    
+        if ( SUCCEEDED( hr ) )
+        {
+            hr = ScaleWICBitmap( source, __max( imageWidth, imageHeight ) );
+            if ( FAILED( hr ) )
+                printf( "can't scale source bitmap, error %#x\n", hr );
+        }
+    
+        UINT width = 0, height = 0;
+    
+        if ( SUCCEEDED( hr ) )
+        {
+            hr = source->GetSize( &width, &height );
+            if ( FAILED( hr ) )
+                printf( "can't get dimensions of path error %#x\n", hr );
+        }
+
+        if ( SUCCEEDED( hr ) )
+        {
+            int xOffset = columnToUse * ( spacing + imageWidth );
+            int yOffset = yOffsets[ si ];
+    
+            //printf( "calling DrawImage, xoffset %d, yoffset %d, width %d, height %d\n", xOffset, yOffset, width, height );
+        
+            DrawImage( bufferOut.data(), strideOut, source, 0, pwcOutput, posterizeLevel, colorizationData, makeGreyscale,
+                       xOffset, yOffset, width, height, g_BitsPerPixel, g_BitsPerPixel );
+        }
+    });
+
+    timeStitch.Complete();
+
+    // If the output image is large, most of the time in the app is spent here compressing and writing the image
+
+    CTimed timeWrite( g_CollageWriteTime );
+
+    hr = bitmapFrameEncode->WritePixels( targetHeight, strideOut, cbOut, bufferOut.data() );
+    if ( FAILED( hr ) )
+    {
+        printf( "failed to write pixels %#x\n", hr );
+        return hr;
+    }
+
+    hr = CommitEncoder( bitmapFrameEncode, encoder );
+
+    return hr;
+} //StitchImages2
+
+HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<BitmapDimensions> & dimensions,
+                       int imagesWide, int imagesHigh, int cellDX, int cellDY, int stitchDX, int stitchDY,
+                       int fillColor, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
+                       bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput )
 {
     CTimed timeStitch( g_CollageStitchTime );
     bool makeEverythingSquare = ( cellDX == cellDY );
@@ -2031,11 +2142,49 @@ HRESULT StitchImages( WCHAR const * pwcOutput, CPathArray & pathArray, vector<Bi
     hr = CommitEncoder( bitmapFrameEncode, encoder );
 
     return hr;
-} //StitchImages
+} //StitchImages1
 
-HRESULT GenerateCollage( WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
-                         ColorizationData * colorizationData, bool makeGreyscale, double aspectRatio,
-                         int fillColor, WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput )
+vector<BitmapDimensions> * g_pdimensions = 0;
+
+static int aspectCompare( const void * a, const void * b )
+{
+    int ia = * (int *) a;
+    int ib = * (int *) b;
+
+    vector<BitmapDimensions> & dim = * g_pdimensions;
+
+    double aspecta = (double) dim[ ia ].width / (double) dim[ ia ].height;
+    double aspectb = (double) dim[ ib ].width / (double) dim[ ib ].height;
+
+    if ( aspecta > aspectb )
+        return 1;
+
+    if ( aspecta < aspectb )
+        return -1;
+
+    return 0;
+} //aspectCompare
+
+void Randomize( vector<int> & elements, std::mt19937 & gen )
+{
+    if ( elements.size() <= 1 )
+        return;
+
+    std::uniform_int_distribution<> distrib( 0, (int) elements.size() - 1 );
+
+    for ( size_t i = 0; i < elements.size() * 2; i++ )
+    {
+        int a = distrib( gen );
+        int b = distrib( gen );
+
+        swap( elements[ a ], elements[ b ] );
+    }
+} //Randomize
+
+HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
+                         ColorizationData * colorizationData, bool makeGreyscale, int collageColumns, int collageSpacing,
+                         double collageSortByAspect, double aspectRatio, int fillColor, WCHAR const * outputMimetype,
+                         bool randomizeCollage, bool lowQualityOutput )
 {
     CTimed timePrep( g_CollagePrepTime );
 
@@ -2073,6 +2222,9 @@ HRESULT GenerateCollage( WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge
         printf( "no files found in path %ws and pattern %ws\n", awcPath, awcSpec );
         return E_FAIL;
     }
+
+    std::random_device rd;
+    std::mt19937 gen( rd() );
 
     if ( randomizeCollage )
         pathArray.Randomize();
@@ -2143,108 +2295,214 @@ HRESULT GenerateCollage( WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge
 
     tracer.Trace( "GenerateCollage: minEdge %d minDXEdge %d, min DYEdge %d, all same aspect: %d\n", minEdge, minDXEdge, minDYEdge, allSameAspect );
 
-    // Try each permutation of stacking the images to find the one that most conforms to the target aspect ratio.
-
-    int imagesWide = 0;
-    int imagesHigh = 0;
-    double bestAspect = 100000.0;
-    double desiredAspect = aspectRatio; // count across / count up and down
-
-    for ( size_t x = 1; x <= fileCount; x++ )
+    if ( 1 == collageMethod )
     {
-        for ( int y = 1; y <= fileCount; y++ )
+        // Try each permutation of stacking the images to find the one that most conforms to the target aspect ratio.
+    
+        int imagesWide = 0;
+        int imagesHigh = 0;
+        double bestAspect = 100000.0;
+        double desiredAspect = aspectRatio; // count across / count up and down
+    
+        for ( size_t x = 1; x <= fileCount; x++ )
         {
-            int capacity = x * y;
-            if ( capacity < fileCount )
-                continue;
-
-            int unused = capacity - fileCount;
-            if ( unused >= x || unused >= y )
-                continue;
-
-            double testAspect = 0;
-
-            if ( allSameAspect )
-                testAspect = ( (double) x * (double) minDXEdge ) / ( (double) y * (double) minDYEdge );
-            else
-                testAspect = ( (double) x * (double) minEdge ) / ( (double) y * (double) minEdge );
-
-            double distance = fabs( desiredAspect - testAspect );
-            if ( distance < bestAspect )
+            for ( int y = 1; y <= fileCount; y++ )
             {
-                bestAspect = distance;
-                imagesWide = x;
-                imagesHigh = y;
+                int capacity = x * y;
+                if ( capacity < fileCount )
+                    continue;
+    
+                int unused = capacity - fileCount;
+                if ( unused >= x || unused >= y )
+                    continue;
+    
+                double testAspect = 0;
+    
+                if ( allSameAspect )
+                    testAspect = ( (double) x * (double) minDXEdge ) / ( (double) y * (double) minDYEdge );
+                else
+                    testAspect = ( (double) x * (double) minEdge ) / ( (double) y * (double) minEdge );
+    
+                double distance = fabs( desiredAspect - testAspect );
+                if ( distance < bestAspect )
+                {
+                    bestAspect = distance;
+                    imagesWide = x;
+                    imagesHigh = y;
+                }
             }
         }
-    }
-
-    int stitchX = imagesWide * minEdge;
-    int stitchY = imagesHigh * minEdge;
-
-    if ( allSameAspect )
-    {
-        stitchX = imagesWide * minDXEdge;
-        stitchY = imagesHigh * minDYEdge;
-    }
-
-    // 2 billion is probably enough?
-    int maxLongestDimension = 2000000000;
-
-    if ( 0 != longEdge )
-        maxLongestDimension = longEdge;
-
-    // Note: the logic below may result in a dimension and/or aspect ratio that isn't exactly as requested
-    // by the caller since the dimensions must be a multiple of the individual image sizes.
-
-    double dmaxLongestDimension = (double) maxLongestDimension;
-
-    if ( stitchX > maxLongestDimension || stitchY > maxLongestDimension )
-    {
+    
+        int stitchX = imagesWide * minEdge;
+        int stitchY = imagesHigh * minEdge;
+    
         if ( allSameAspect )
         {
-            if ( minDYEdge > minDXEdge )
-            {
-                double dScale = ( dmaxLongestDimension / (double) imagesHigh ) / (double) minDYEdge;
-                minDXEdge = (int) round( dScale * (double) minDXEdge );
-                minDYEdge = maxLongestDimension / imagesHigh;
-                stitchY = maxLongestDimension;
-                stitchX = imagesWide * minDXEdge;
-            }
-            else
-            {
-                double dScale = ( dmaxLongestDimension / (double) imagesWide ) / (double) minDXEdge;
-                minDYEdge = (int) round( dScale * (double) minDYEdge );
-                minDXEdge = maxLongestDimension / imagesWide;
-                stitchX = maxLongestDimension;
-                stitchY = imagesHigh * minDYEdge;
-            }
+            stitchX = imagesWide * minDXEdge;
+            stitchY = imagesHigh * minDYEdge;
         }
-        else
+    
+        // 2 billion is probably enough?
+        int maxLongestDimension = 2000000000;
+    
+        if ( 0 != longEdge )
+            maxLongestDimension = longEdge;
+    
+        // Note: the logic below may result in a dimension and/or aspect ratio that isn't exactly as requested
+        // by the caller since the dimensions must be a multiple of the individual image sizes.
+    
+        double dmaxLongestDimension = (double) maxLongestDimension;
+    
+        if ( stitchX > maxLongestDimension || stitchY > maxLongestDimension )
         {
-            if ( stitchX > stitchY )
-                minEdge = maxLongestDimension / imagesWide;
+            if ( allSameAspect )
+            {
+                if ( minDYEdge > minDXEdge )
+                {
+                    double dScale = ( dmaxLongestDimension / (double) imagesHigh ) / (double) minDYEdge;
+                    minDXEdge = (int) round( dScale * (double) minDXEdge );
+                    minDYEdge = maxLongestDimension / imagesHigh;
+                    stitchY = maxLongestDimension;
+                    stitchX = imagesWide * minDXEdge;
+                }
+                else
+                {
+                    double dScale = ( dmaxLongestDimension / (double) imagesWide ) / (double) minDXEdge;
+                    minDYEdge = (int) round( dScale * (double) minDYEdge );
+                    minDXEdge = maxLongestDimension / imagesWide;
+                    stitchX = maxLongestDimension;
+                    stitchY = imagesHigh * minDYEdge;
+                }
+            }
             else
-                minEdge = maxLongestDimension / imagesHigh;
-
-            stitchX = minEdge * imagesWide;
-            stitchY = minEdge * imagesHigh;
+            {
+                if ( stitchX > stitchY )
+                    minEdge = maxLongestDimension / imagesWide;
+                else
+                    minEdge = maxLongestDimension / imagesHigh;
+    
+                stitchX = minEdge * imagesWide;
+                stitchY = minEdge * imagesHigh;
+            }
         }
+    
+        if ( !allSameAspect )
+        {
+            minDXEdge = minEdge;
+            minDYEdge = minEdge;
+        }
+    
+        timePrep.Complete();
+    
+        printf( "source images%s all have the same aspect ratio\n", allSameAspect ? "" : " don't" );
+        printf( "collage will be %d by %d, each element %d by %d, and %d by %d images\n", stitchX, stitchY, minDXEdge, minDYEdge, imagesWide, imagesHigh );
+    
+        return StitchImages1( pwcOutput, pathArray, dimensions, imagesWide, imagesHigh, minDXEdge, minDYEdge, stitchX, stitchY,
+                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput );
     }
 
-    if ( !allSameAspect )
+    if ( 2 == collageMethod )
     {
-        minDXEdge = minEdge;
-        minDYEdge = minEdge;
+        // Method 2 means a fixed # of columns. Each image is made the same width.
+
+        const int columns = __min( fileCount, collageColumns );
+        const int targetWidth = ( 0 == longEdge ) ? 4096 : longEdge;
+        const int spacing = collageSpacing; // # of fillColor pixels between images. Not applied to the outside border of the collage
+
+        // See how tall the collage will be so it can be pre-allocated before copying the images into the buffer
+
+        int imageWidth = ( targetWidth - ( ( columns - 1 ) * spacing ) ) / columns;
+        int fullWidth = ( imageWidth * columns ) + ( ( columns - 1 ) * spacing );
+        vector<int> columnsToUse( fileCount );
+        vector<int> yOffsets( fileCount );
+        vector<int> bottoms( fileCount );
+
+        // sort by aspect ratio so the tallest images are placed first. This helps minimize one column being much taller than the others
+
+        vector<int> sortedIndexes( fileCount );
+        for ( int i = 0; i < fileCount; i++ )
+            sortedIndexes[ i ] = i;
+
+        g_pdimensions = &dimensions;
+        qsort( sortedIndexes.data(), fileCount, sizeof( int ), aspectCompare );
+
+        // Lay out the images
+
+        for ( int i = 0; i < fileCount; i++ )
+        {
+            int si = sortedIndexes[ i ];
+            int columnToUse = 0;
+            int highestBottom = INT_MAX;
+            for ( int c = 0; c < columns; c++ )
+            {
+                if ( bottoms[ c ] < highestBottom )
+                {
+                    highestBottom = bottoms[ c ];
+                    columnToUse = c;
+                }
+            }
+    
+            int imageHeight = round( (double) imageWidth / (double) dimensions[ si ].width * (double) dimensions[ si ].height );
+    
+            yOffsets[ si ] = bottoms[ columnToUse ];
+            bottoms[ columnToUse ] += ( spacing + imageHeight );
+            columnsToUse[ si ] = columnToUse;
+        }
+
+        // find the tallest column -- that's the collage height
+
+        int fullHeight = 0;
+        for ( int c = 0; c < columns; c++ )
+        {
+            //printf( "height of column %d: %d\n", c, bottoms[ c ] );
+            if ( bottoms[ c ] > fullHeight )
+                fullHeight = bottoms[ c ];
+        }
+
+        fullHeight -= spacing;
+
+        // randomize the vertical position of photos within each column.
+
+        if ( !collageSortByAspect )
+        {
+            for ( int c = 0; c < columns; c++ )
+            {
+                // find the indexes of photos in this column
+    
+                vector<int> randIndex;
+                for ( int i = 0; i < fileCount; i++ )
+                {
+                    int si = sortedIndexes[ i ];
+                    if ( columnsToUse[ si ] == c )
+                        randIndex.push_back( si );
+                }
+
+                Randomize( randIndex, gen );
+
+                // recompute the y offset of each photo in the column
+    
+                int currenty = 0;
+                for ( int i = 0; i < randIndex.size(); i++ )
+                {
+                    int ri = randIndex[ i ];
+
+                    yOffsets[ ri ] = currenty;
+                    int imageHeight = round( (double) imageWidth / (double) dimensions[ ri ].width * (double) dimensions[ ri ].height );
+                    currenty += ( spacing + imageHeight );
+                }
+            }
+        }
+
+        timePrep.Complete();
+
+        //printf( "columns %d, target width %d, collage width %d, collage height %d, imageWidth %d\n", columns, targetWidth, fullWidth, fullHeight, imageWidth );
+
+        return StitchImages2( pwcOutput, pathArray, sortedIndexes, columnsToUse, yOffsets, dimensions, columns,
+                              fullHeight, fullWidth, spacing, imageWidth, fillColor, posterizeLevel, colorizationData,
+                              makeGreyscale, outputMimetype, lowQualityOutput );
     }
 
-    timePrep.Complete();
-
-    printf( "source images%s all have the same aspect ratio\n", allSameAspect ? "" : " don't" );
-    printf( "collage will be %d by %d, each element %d by %d, and %d by %d images\n", stitchX, stitchY, minDXEdge, minDYEdge, imagesWide, imagesHigh );
-
-    return StitchImages( pwcOutput, pathArray, dimensions, imagesWide, imagesHigh, minDXEdge, minDYEdge, stitchX, stitchY,
-                         fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput );
+    return E_FAIL;
 } //GenerateCollage
 
 HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
@@ -2273,11 +2531,13 @@ void Usage( char * message = 0 )
     printf( "  Image Convert\n" );
     printf( "  arguments: <input>           The input image filename or path specifier for a collage.\n" );
     printf( "             -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.\n" );
-    printf( "             -c                Generate a collage. <input> is a path to input files. Aspect ratio attempted, not guaranteed.\n" );
+    printf( "             -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.\n" );
+    printf( "             -c:1              Same as -c\n" );
+    printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S spacing. A=y|n for sorting by aspect ratio.\n" );
     printf( "             -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.\n" );
     printf( "             -g                Greyscale the output image. Does not apply to the fillcolor.\n" );
     printf( "             -i                Show CPU and RAM usage.\n" );
-    printf( "             -l:<longedge>     Pixel count for the long edge of the output photo.\n" );
+    printf( "             -l:<longedge>     Pixel count for the long edge of the output photo or for /c:2 the collage width.\n" );
     printf( "             -o:<filename>     The output filename. Required argument. File will contain no exif info like GPS location.\n" );
     printf( "             -p:x              Posterization level. 1..256 inclusive, Default 0 means none. # colors per channel.\n" );
     printf( "             -q                Sacrifice image quality to produce a smaller JPG output file (4:2:2 not 4:4:4, 60%% not 100%%).\n" );
@@ -2311,9 +2571,10 @@ void Usage( char * message = 0 )
     printf( "    ic cfc.jpg /o:out_cfc.png /zc:16;inputcolors.jpg\n" );
     printf( "    ic cfc.jpg /o:out_cfc.png /zb:64;inputcolors.jpg\n" );
     printf( "    ic cfc.jpg /o:out_cfc.png /zh:8;inputcolors.jpg\n" );
+    printf( "    ic /c:2:6:10:n /r /l:4096 d:\\treefort_pics\\*.jpg /o:treefort.png\n" );
     printf( "  notes:    - -g only applies to the image, not fillcolor. Use /f with identical rgb values for greyscale fills.\n" );
     printf( "            - Exif data is stripped for your protection.\n" );
-    printf( "            - fillcolor may or may not start with 0x.\n" );
+    printf( "            - fillcolor is always hex, may or may not start with 0x.\n" );
     printf( "            - Both -a and -l are aspirational for collages. Aspect ratio and long edge may change to accomodate content.\n" );
     printf( "            - If a precise collage aspect ratio or long edge are required, run the app twice; on a single image it's exact.\n" );
     printf( "            - Writes as high a quality of JPG as it can: 1.0 quality and 4:4:4\n" );
@@ -2321,6 +2582,12 @@ void Usage( char * message = 0 )
     printf( "            - Output file is always 24bpp unless both input and output are tif and input is 48bpp, which results in 48bpp.\n" );
     printf( "            - Output file type is inferred from the extension specified. JPG is assumed if not obvious.\n" );
     printf( "            - If an output file is specified with /s, a 128-pixel wide image is created with strips for each color.\n" );
+    printf( "            -    collage method 1: -- packs all images of the same aspect ratio or uses squares otherwise.\n" );
+    printf( "            -                      -- attempts to match /a: aspect ratio.\n" );
+    printf( "            -    collage method 2: -- adds spacing between images and creates identical-width columns.\n" );
+    printf( "            -                      -- The longedge argument applies to the width, which may be shorter than the height.\n" );
+    printf( "            -                      -- defaults are 3 columns, 6 pixels of spacing, and don't sort by aspect ratio (-c:2:3:6:n).\n" );
+    printf( "            -                      -- doesn't attempt to match /a: aspect ratio since a column count is specified.\n" );
     exit( 0 );
 } //Usage
 
@@ -2501,12 +2768,11 @@ static DWORD ColorizationColors256[] =
 
 extern "C" int wmain( int argc, WCHAR * argv[] )
 {
-    static WCHAR awcInput[ MAX_PATH ];
-    static WCHAR awcOutput[ MAX_PATH ];
-
     #ifndef NDEBUG
-        for ( int testing = 0; testing < 3; testing++ )
+        parallel_for ( 0, 5, [&] ( int testing )
+        {
             assert( KDTreeBGR::UnitTest() );
+        } );
     #endif
 
     long long totalTime = 0;
@@ -2531,9 +2797,13 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
         Usage();
     }
 
-    awcInput[0] = 0;
-    awcOutput[0] = 0;
+    static WCHAR awcInput[ MAX_PATH ] = {0};
+    static WCHAR awcOutput[ MAX_PATH ] = {0};
     bool generateCollage = false;
+    int collageMethod = 1;
+    int collageColumns = 3;
+    int collageSpacing = 6;
+    bool collageSortByAspect = false;
     bool randomizeCollage = false;
     bool runtimeInfo = false;
     bool showColors = false;
@@ -2569,7 +2839,39 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                 aspectRatio = ParseAspectRatio( parg + 3 );
             }
             else if ( L'c' == p )
+            {
                 generateCollage = true;
+
+                if ( ':' == parg[ 2 ] && 0 != parg[ 3 ] )
+                {
+                    collageMethod = _wtoi( parg + 3 );
+
+                    if ( collageMethod < 1 || collageMethod > 2 )
+                        Usage( "collage method isn't valid" );
+
+                    if ( 2 == collageMethod )
+                    {
+                        WCHAR const * pwcColon1 = wcschr( parg + 4, ':' );
+                        WCHAR const * pwcColon2 = ( 0 != pwcColon1 ) ? wcschr( pwcColon1 + 1, ':' ) : 0;
+                        WCHAR const * pwcColon3 = ( 0 != pwcColon2 ) ? wcschr( pwcColon2 + 1, ':' ) : 0;
+
+                        if ( 0 != pwcColon1 )
+                            collageColumns = _wtoi( pwcColon1 + 1 );
+
+                        if ( 0 != pwcColon2 )
+                            collageSpacing = _wtoi( pwcColon2 + 1 );
+
+                        if ( 0 != pwcColon3 )
+                            collageSortByAspect = ( 'y' == tolower( * ( pwcColon3 + 1 ) ) );
+
+                        if ( collageColumns < 1 || collageColumns > 100 )
+                            Usage( "invalid collage column count" );
+
+                        if ( collageSpacing < 0 || collageSpacing > 100 )
+                            Usage( "invalid collage spacing" );
+                    }
+                }
+            }
             else if ( L'f' == p )
             {
                 if ( L':' != parg[2] )
@@ -2681,7 +2983,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                 WCHAR const *semi = wcschr( parg, L';' );
                 if ( semi )
                 {
-                    static WCHAR awcColorFile[ MAX_PATH ];
+                    static WCHAR awcColorFile[ MAX_PATH ] = {0};
                     _wfullpath( awcColorFile, semi + 1, _countof( awcColorFile ) );
                     DWORD attr = GetFileAttributesW( awcColorFile );
                     if ( INVALID_FILE_ATTRIBUTES == attr )
@@ -2762,9 +3064,9 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                             pBuiltInArray = ColorizationColors256;
                         }
 
-                        cd.bgrdata.resize( countBuiltIn );
+                        cd.bgrdata.resize( __min( posterizeLevel, countBuiltIn ) );
 
-                        for ( int c = 0; c < countBuiltIn; c++ )
+                        for ( int c = 0; c < cd.bgrdata.size(); c++ )
                            cd.bgrdata[ c ] = pBuiltInArray[ c ];
                     }
                 }
@@ -2850,9 +3152,9 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     }
     else if ( generateCollage )
     {
-        hr = GenerateCollage( awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
-                              aspectRatio, fillColor, outputMimetype, randomizeCollage, lowQualityOutput );
-
+        hr = GenerateCollage( collageMethod, awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
+                              collageColumns, collageSpacing, collageSortByAspect, aspectRatio, fillColor, outputMimetype,
+                              randomizeCollage, lowQualityOutput );
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
         else
@@ -2862,7 +3164,6 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     {
         hr = ConvertImage( awcInput, awcOutput, longEdge, waveMethod, posterizeLevel, colorizationData, makeGreyscale,
                            aspectRatio, fillColor, outputMimetype, lowQualityOutput );
-    
         if ( SUCCEEDED( hr ) )
             printf( "output written successfully: %ws\n", awcOutput );
         else
@@ -2894,8 +3195,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             if ( 0 != g_ShowColorsOpenTime )
                 PrintStat( "  open:", g_ShowColorsOpenTime / CTimed::NanoPerMilli() );
 
-            if ( 0 != g_ShowCopyPixelsTime )
-                PrintStat( "  copy pixels:", g_ShowCopyPixelsTime / CTimed::NanoPerMilli() );
+            if ( 0 != g_ShowReadPixelsTime )
+                PrintStat( "  copy pixels:", g_ShowReadPixelsTime / CTimed::NanoPerMilli() );
             
             PrintStat( "  copy colors", g_ShowColorsCopyTime / CTimed::NanoPerMilli() );
             PrintStat( "  sort:", g_ShowColorsSortTime / CTimed::NanoPerMilli() );
@@ -2914,13 +3215,13 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             PrintStat( "collage prep:", g_CollagePrepTime / CTimed::NanoPerMilli() );
             PrintStat( "collage stitch:", g_CollageStitchTime / CTimed::NanoPerMilli() );
             PrintStat( "  flood fill:", g_CollageStitchFloodTime / CTimed::NanoPerMilli() );
-            PrintStat( "  read pixels:", g_CollageStitchCopyPixelsTime / CTimed::NanoPerMilli() );
+            PrintStat( "  read pixels:", g_CollageStitchReadPixelsTime / CTimed::NanoPerMilli() );
             PrintStat( "  draw:", g_CollageStitchDrawTime / CTimed::NanoPerMilli() );
             PrintStat( "collage write:", g_CollageWriteTime / CTimed::NanoPerMilli() );
         }
 
-        if ( 0 != g_CopyPixelsTime )
-            PrintStat( "read pixels:", g_CopyPixelsTime / CTimed::NanoPerMilli() );
+        if ( 0 != g_ReadPixelsTime )
+            PrintStat( "read pixels:", g_ReadPixelsTime / CTimed::NanoPerMilli() );
 
         if ( 0 !=  g_PosterizePixelsTime )
             PrintStat( "posterize image:", g_PosterizePixelsTime / CTimed::NanoPerMilli() );
