@@ -1,7 +1,7 @@
 # IC
 ### Image Conversion command-line app for Windows
 
-Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS data to the output image. The app also creates simple collages of images.
+Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS location to the output image. The app also creates simple collages of images.
 
 To build on Windows:
     
@@ -57,7 +57,7 @@ usage: ic input /o:output
     
     - -g only applies to the image, not fillcolor. Use /f with identical rgb values for greyscale fills.
     - Exif data is stripped for your protection.
-    - fillcolor may or may not start with 0x.
+    - fillcolor is always hex, and may or may not start with 0x.
     - Both -a and -l are aspirational for collages. Aspect ratio and long edge may change to accomodate content.
     - If a precise collage aspect ratio or long edge are required, run the app twice; on a single image it's exact.
     - Writes as high a quality of JPG as it can: 1.0 quality and 4:4:4
