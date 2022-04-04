@@ -2546,7 +2546,7 @@ void Usage( char * message = 0 )
     printf( "             -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.\n" );
     printf( "             -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.\n" );
     printf( "             -c:1              Same as -c\n" );
-    printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S spacing. A=t|s top, spaced.\n" );
+    printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S pixel spacing. A (see below)\n" );
     printf( "             -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.\n" );
     printf( "             -g                Greyscale the output image. Does not apply to the fillcolor.\n" );
     printf( "             -i                Show CPU and RAM usage.\n" );
@@ -2584,7 +2584,9 @@ void Usage( char * message = 0 )
     printf( "    ic cfc.jpg /o:out_cfc.png /zc:16;inputcolors.jpg\n" );
     printf( "    ic cfc.jpg /o:out_cfc.png /zb:64;inputcolors.jpg\n" );
     printf( "    ic cfc.jpg /o:out_cfc.png /zh:8;inputcolors.jpg\n" );
-    printf( "    ic /c:2:6:10:n /r /l:4096 d:\\treefort_pics\\*.jpg /o:treefort.png\n" );
+    printf( "    ic /c:2:6:10:S /r /l:4096 d:\\treefort_pics\\*.jpg /o:treefort.png\n" );
+    printf( "    ic /c:2:6:10:s /r /l:4096 d:\\treefort_pics\\*.jpg /o:treefort.png\n" );
+    printf( "    ic /i z:\\jbrekkie\\*.jpg /o:michelle_8.png /c:2:5:4:S /zc:8,0xdd9f1a,0xbe812e,0xe3c871,0xe0b74b,0xeee1c1,0xc69948,0x3a3732,0x82543d /f:0xdd9f1a /g\n" );
     printf( "  notes:    - -g only applies to the image, not fillcolor. Use /f with identical rgb values for greyscale fills.\n" );
     printf( "            - Exif data is stripped for your protection.\n" );
     printf( "            - fillcolor is always hex, may or may not start with 0x.\n" );
@@ -2601,7 +2603,9 @@ void Usage( char * message = 0 )
     printf( "            -                      -- The longedge argument applies to the width, which may be shorter than the height.\n" );
     printf( "            -                      -- defaults are 3 columns, 6 pixels of spacing, and don't sort by aspect ratio (-c:2:3:6:n).\n" );
     printf( "            -                      -- doesn't attempt to match /a: aspect ratio since a column count is specified.\n" );
-    printf( "            -                      -- t/top: tallest images at the top, s/spaced: space images evenly\n" );
+    printf( "            -                      -- /A arguments - uppercase yes, lowercase no\n" );
+    printf( "            -                         T (tallest items on top) / t (random arrangement (default))\n" );
+    printf( "            -                         S (space images out (default)) / s (force consistent spacing and perhaps leave blank space at bottom\n" );
     exit( 0 );
 } //Usage
 
@@ -2878,10 +2882,19 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
 
                         if ( 0 != pwcColon3 )
                         {
-                            char modifier = tolower( * ( pwcColon3 + 1 ) );
-
-                            collageSortByAspect = ( 't' == modifier );
-                            collageSpaced = ( 's' == modifier );
+                            for ( const WCHAR * pwcA = pwcColon3 + 1; *pwcA; pwcA++ )
+                            {
+                                if ( 'T' == *pwcA )
+                                    collageSortByAspect = true;
+                                else if ( 't' == *pwcA )
+                                    collageSortByAspect = false;
+                                else if ( 'S' == *pwcA )
+                                    collageSpaced = true;
+                                else if ( 's' == *pwcA )
+                                    collageSpaced = false;
+                                else
+                                    Usage( "invalid collage A argument" );
+                            }
                         }
 
                         if ( collageColumns < 1 || collageColumns > 100 )
