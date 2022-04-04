@@ -3,6 +3,8 @@
 
 Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS location to the output image. The app also creates simple collages of images.
 
+The app uses k-means clustering for finding most common colors in images and a kd-tree for color mapping. The most common colors are written to stdout, but also an image can be created with a colorstrip and hex codes for each color.
+
 To build on Windows:
     
     Using a Visual Studio x64 Native Tools Command Prompt window, run m.bat
