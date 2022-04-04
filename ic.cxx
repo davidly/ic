@@ -1386,7 +1386,7 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
         }
         printf( "\n};\n" );
     }
-} //ShowColors
+} //ShowColorsFromBuffer
 
 HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & centroids, bool printColors,
                     WCHAR const * pwcOutput = 0, WCHAR const * outputMimetype = 0 )
@@ -1619,7 +1619,7 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
         CTimed timed( g_CollageStitchReadPixelsTime );
         CTimed timedReadPixels( g_ReadPixelsTime );
 
-        // Almost all of the runtime of this app will be in source->CopyPixels(), where the input file is parsed
+        // Almost all of the runtime of this app will be in source->CopyPixels(), where the input file is parsed and scaled
 
         HRESULT hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.data() );
         if ( FAILED( hr ) )
@@ -2183,8 +2183,8 @@ void Randomize( vector<int> & elements, std::mt19937 & gen )
 
 HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
                          ColorizationData * colorizationData, bool makeGreyscale, int collageColumns, int collageSpacing,
-                         double collageSortByAspect, double aspectRatio, int fillColor, WCHAR const * outputMimetype,
-                         bool randomizeCollage, bool lowQualityOutput )
+                         bool collageSortByAspect, bool collageSpaced, double aspectRatio, int fillColor,
+                         WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput )
 {
     CTimed timePrep( g_CollagePrepTime );
 
@@ -2409,8 +2409,6 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
         const int targetWidth = ( 0 == longEdge ) ? 4096 : longEdge;
         const int spacing = collageSpacing; // # of fillColor pixels between images. Not applied to the outside border of the collage
 
-        // See how tall the collage will be so it can be pre-allocated before copying the images into the buffer
-
         int imageWidth = ( targetWidth - ( ( columns - 1 ) * spacing ) ) / columns;
         int fullWidth = ( imageWidth * columns ) + ( ( columns - 1 ) * spacing );
         vector<int> columnsToUse( fileCount );
@@ -2479,6 +2477,21 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
 
                 Randomize( randIndex, gen );
 
+                // even out the spacing
+
+                int spaceCount = randIndex.size() - 1;
+                int extraSpace = fullHeight - ( spaceCount * spacing );
+                for ( int i = 0; i < randIndex.size(); i++ )
+                {
+                    int ri = randIndex[ i ];
+                    int imageHeight = round( (double) imageWidth / (double) dimensions[ ri ].width * (double) dimensions[ ri ].height );
+                    extraSpace -= imageHeight;
+                }
+
+                int extraSpaceBetween = collageSpaced ? ( extraSpace / spaceCount ) : 0;
+                int extraSpaceLast = collageSpaced ? ( extraSpace % spaceCount ) : 0;
+                //printf( "extraspace %d, between %d, last %d, spaceCount %d\n", extraSpace, extraSpaceBetween, extraSpaceLast, spaceCount );
+
                 // recompute the y offset of each photo in the column
     
                 int currenty = 0;
@@ -2488,7 +2501,7 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
 
                     yOffsets[ ri ] = currenty;
                     int imageHeight = round( (double) imageWidth / (double) dimensions[ ri ].width * (double) dimensions[ ri ].height );
-                    currenty += ( spacing + imageHeight );
+                    currenty += ( spacing + imageHeight + extraSpaceBetween + ( ( i == spaceCount - 1 ) ? extraSpaceLast : 0 ) );
                 }
             }
         }
@@ -2533,7 +2546,7 @@ void Usage( char * message = 0 )
     printf( "             -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.\n" );
     printf( "             -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.\n" );
     printf( "             -c:1              Same as -c\n" );
-    printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S spacing. A=y|n for sorting by aspect ratio.\n" );
+    printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S spacing. A=t|s top, spaced.\n" );
     printf( "             -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.\n" );
     printf( "             -g                Greyscale the output image. Does not apply to the fillcolor.\n" );
     printf( "             -i                Show CPU and RAM usage.\n" );
@@ -2588,6 +2601,7 @@ void Usage( char * message = 0 )
     printf( "            -                      -- The longedge argument applies to the width, which may be shorter than the height.\n" );
     printf( "            -                      -- defaults are 3 columns, 6 pixels of spacing, and don't sort by aspect ratio (-c:2:3:6:n).\n" );
     printf( "            -                      -- doesn't attempt to match /a: aspect ratio since a column count is specified.\n" );
+    printf( "            -                      -- t/top: tallest images at the top, s/spaced: space images evenly\n" );
     exit( 0 );
 } //Usage
 
@@ -2804,6 +2818,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     int collageColumns = 3;
     int collageSpacing = 6;
     bool collageSortByAspect = false;
+    bool collageSpaced = true;
     bool randomizeCollage = false;
     bool runtimeInfo = false;
     bool showColors = false;
@@ -2862,7 +2877,12 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                             collageSpacing = _wtoi( pwcColon2 + 1 );
 
                         if ( 0 != pwcColon3 )
-                            collageSortByAspect = ( 'y' == tolower( * ( pwcColon3 + 1 ) ) );
+                        {
+                            char modifier = tolower( * ( pwcColon3 + 1 ) );
+
+                            collageSortByAspect = ( 't' == modifier );
+                            collageSpaced = ( 's' == modifier );
+                        }
 
                         if ( collageColumns < 1 || collageColumns > 100 )
                             Usage( "invalid collage column count" );
@@ -3153,8 +3173,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     else if ( generateCollage )
     {
         hr = GenerateCollage( collageMethod, awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
-                              collageColumns, collageSpacing, collageSortByAspect, aspectRatio, fillColor, outputMimetype,
-                              randomizeCollage, lowQualityOutput );
+                              collageColumns, collageSpacing, collageSortByAspect, collageSpaced, aspectRatio, fillColor,
+                              outputMimetype, randomizeCollage, lowQualityOutput );
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
         else
