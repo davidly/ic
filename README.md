@@ -3,6 +3,8 @@
 
 Useful for converting from one format to another (e.g. heic to jpg) or creating a lower-resolution version of an image. The app copies no EXIF data like GPS location to the output image. The app also creates simple collages of images.
 
+The app uses k-means clustering for finding most common colors in images and a kd-tree for color mapping. The most common colors are written to stdout, but also an image can be created with a colorstrip and hex codes for each color.
+
 To build on Windows:
     
     Using a Visual Studio x64 Native Tools Command Prompt window, run m.bat
@@ -14,7 +16,7 @@ usage: ic input /o:output
                -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.
                -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.
                -c:1              Same as -c
-               -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S spacing. A=y|n for sorting by aspect ratio.
+               -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S pixel spacing. A (see below)
                -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.
                -g                Greyscale the output image. Does not apply to the fillcolor.
                -i                Show CPU and RAM usage.
@@ -52,7 +54,9 @@ usage: ic input /o:output
       ic cfc.jpg /o:out_cfc.png /zc:16;inputcolors.jpg
       ic cfc.jpg /o:out_cfc.png /zb:64;inputcolors.jpg
       ic cfc.jpg /o:out_cfc.png /zh:8;inputcolors.jpg
-      ic /c:2:6:10:n /r /l:4096 d:\treefort_pics\*.jpg /o:treefort.png /f:0xafafaf
+      ic /c:2:6:10:S /r /l:4096 d:\treefort_pics\*.jpg /o:treefort.png
+      ic /c:2:6:10:s /r /l:4096 d:\treefort_pics\*.jpg /o:treefort.png
+      ic /i z:\jbrekkie\*.jpg /o:michelle_8.png /c:2:5:4:S /zc:8,0xdd9f1a,0xbe812e,0xe3c871,0xe0b74b,0xeee1c1,0xc69948,0x3a3732,0x82543d /f:0xdd9f1a /g
     notes:    - -g only applies to the image, not fillcolor. Use /f with identical rgb values for greyscale fills.
               - Exif data is stripped for your protection.
               - fillcolor is always hex, may or may not start with 0x.
@@ -69,4 +73,7 @@ usage: ic input /o:output
               -                      -- The longedge argument applies to the width, which may be shorter than the height.
               -                      -- defaults are 3 columns, 6 pixels of spacing, and don't sort by aspect ratio (-c:2:3:6:n).
               -                      -- doesn't attempt to match /a: aspect ratio since a column count is specified.
+              -                      -- /A arguments - uppercase yes, lowercase no
+              -                         T (tallest items on top) / t (random arrangement (default))
+              -                         S (space images out (default)) / s (force consistent spacing and perhaps leave blank space at bottom
 
