@@ -436,7 +436,7 @@ HRESULT CopyMetadata( ComPtr<IWICBitmapFrameEncode> encoder, ComPtr<IWICBitmapFr
     return hr;
 } //CopyMetadata
 
-HRESULT ScaleWICBitmap( ComPtr<IWICBitmapSource> & source, int longEdge )
+HRESULT ScaleWICBitmap( ComPtr<IWICBitmapSource> & source, int longEdge, bool highQualityScaling )
 {
     UINT width, height;
 
@@ -470,7 +470,9 @@ HRESULT ScaleWICBitmap( ComPtr<IWICBitmapSource> & source, int longEdge )
         return hr;
     }
 
-    hr = scaler->Initialize( source.Get(), targetWidth, targetHeight, WICBitmapInterpolationModeHighQualityCubic );
+    hr = scaler->Initialize( source.Get(), targetWidth, targetHeight,
+                             highQualityScaling ? WICBitmapInterpolationModeHighQualityCubic :
+                                                  WICBitmapInterpolationModeNearestNeighbor );
     if ( FAILED( hr ) )
     {
         printf( "can't initialize scaler: %#x\n", hr );
@@ -1722,7 +1724,7 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
 HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & source, ComPtr<IWICBitmapFrameDecode> & frame,
                         int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
                         bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype,
-                        bool lowQualityOutput, bool gameBoy )
+                        bool lowQualityOutput, bool gameBoy, bool highQualityScaling )
 {
     ComPtr<IWICBitmapEncoder> encoder;
     ComPtr<IWICBitmapFrameEncode> bitmapFrameEncode;
@@ -1773,7 +1775,7 @@ HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & sour
 
         if ( 0 != longEdge )
         {
-            hr = ScaleWICBitmap( source, longEdge );
+            hr = ScaleWICBitmap( source, longEdge, highQualityScaling );
             if ( FAILED( hr ) )
             {
                 printf( "failed to scale input bitmap %#x\n", hr );
@@ -1881,7 +1883,7 @@ HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & sour
             }
         }
 
-        hr = ScaleWICBitmap( source, wIn > hIn ? wIn : hIn );
+        hr = ScaleWICBitmap( source, wIn > hIn ? wIn : hIn, highQualityScaling );
         if ( FAILED( hr ) )
         {
             printf( "failed to scale input bitmap %#x\n", hr );
@@ -2007,7 +2009,7 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
                        vector<BitmapDimensions> & dimensions, int columns,
                        int targetHeight, int targetWidth, int spacing, int imageWidth, int fillColor,
                        int posterizeLevel, ColorizationData * colorizationData, bool makeGreyscale,
-                       WCHAR const * outputMimetype, bool lowQualityOutput )
+                       WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling )
 {
     CTimed timeStitch( g_CollageStitchTime );
     ComPtr<IWICBitmapEncoder> encoder;
@@ -2067,7 +2069,7 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
     
         if ( SUCCEEDED( hr ) )
         {
-            hr = ScaleWICBitmap( source, __max( imageWidth, imageHeight ) );
+            hr = ScaleWICBitmap( source, __max( imageWidth, imageHeight ), highQualityScaling );
             if ( FAILED( hr ) )
                 printf( "can't scale source bitmap, error %#x\n", hr );
         }
@@ -2115,7 +2117,7 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
 HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<BitmapDimensions> & dimensions,
                        int imagesWide, int imagesHigh, int cellDX, int cellDY, int stitchDX, int stitchDY,
                        int fillColor, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
-                       bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput )
+                       bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling )
 {
     CTimed timeStitch( g_CollageStitchTime );
     bool makeEverythingSquare = ( cellDX == cellDY );
@@ -2180,7 +2182,7 @@ HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<B
     
                 if ( SUCCEEDED( hr ) )
                 {
-                    hr = ScaleWICBitmap( source, __max( cellDY, cellDX ) );
+                    hr = ScaleWICBitmap( source, __max( cellDY, cellDX ), highQualityScaling );
                     if ( FAILED( hr ) )
                         printf( "can't scale source bitmap, error %#x\n", hr );
                 }
@@ -2280,7 +2282,7 @@ void Randomize( vector<int> & elements, std::mt19937 & gen )
 HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
                          ColorizationData * colorizationData, bool makeGreyscale, int collageColumns, int collageSpacing,
                          bool collageSortByAspect, bool collageSpaced, double aspectRatio, int fillColor,
-                         WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput )
+                         WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput, bool highQualityScaling )
 {
     CTimed timePrep( g_CollagePrepTime );
 
@@ -2494,7 +2496,7 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
         printf( "collage will be %d by %d, each element %d by %d, and %d by %d images\n", stitchX, stitchY, minDXEdge, minDYEdge, imagesWide, imagesHigh );
     
         return StitchImages1( pwcOutput, pathArray, dimensions, imagesWide, imagesHigh, minDXEdge, minDYEdge, stitchX, stitchY,
-                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput );
+                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling );
     }
 
     if ( 2 == collageMethod )
@@ -2608,14 +2610,15 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
 
         return StitchImages2( pwcOutput, pathArray, sortedIndexes, columnsToUse, yOffsets, dimensions, columns,
                               fullHeight, fullWidth, spacing, imageWidth, fillColor, posterizeLevel, colorizationData,
-                              makeGreyscale, outputMimetype, lowQualityOutput );
+                              makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling );
     }
 
     return E_FAIL;
 } //GenerateCollage
 
 HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
-                      bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool lowQualityOutput, bool gameBoy )
+                      bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool lowQualityOutput, bool gameBoy,
+                      bool highQualityScaling )
 {
     ComPtr<IWICBitmapSource> source;
     ComPtr<IWICBitmapFrameDecode> frame;
@@ -2624,7 +2627,7 @@ HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, i
     HRESULT hr = LoadWICBitmap( input, source, frame, force24bppBGR );
     if ( SUCCEEDED( hr ) )
         hr = WriteWICBitmap( output, source, frame, longEdge, waveMethod, posterizeLevel, colorizationData,
-                             makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput, gameBoy );
+                             makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput, gameBoy, highQualityScaling );
     
     frame.Reset();
     source.Reset();
@@ -2646,6 +2649,7 @@ void Usage( char * message = 0 )
     printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S pixel spacing. A arrangement (see below)\n" );
     printf( "             -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.\n" );
     printf( "             -g                Greyscale the output image. Does not apply to the fillcolor.\n" );
+    printf( "             -h                Turn off HighQualityCubic scaling and use NearestNeighbor.\n" );
     printf( "             -i                Show CPU and RAM usage.\n" );
     printf( "             -l:<longedge>     Pixel count for the long edge of the output photo or for /c:2 the collage width.\n" );
     printf( "             -o:<filename>     The output filename. Required argument. File will contain no exif info like GPS location.\n" );
@@ -2924,6 +2928,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     bool collageSpaced = true;
     bool randomizeCollage = false;
     bool runtimeInfo = false;
+    bool highQualityScaling = true;
     bool showColors = false;
     int showColorCount = 64;
     bool makeGreyscale = false;
@@ -3018,6 +3023,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             }
             else if ( L'g' == p )
                 makeGreyscale = true;
+            else if ( L'h' == p )
+                highQualityScaling = false;
             else if ( L'i' == p )
                 runtimeInfo = true;
             else if ( L'l' == p )
@@ -3288,7 +3295,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     {
         hr = GenerateCollage( collageMethod, awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
                               collageColumns, collageSpacing, collageSortByAspect, collageSpaced, aspectRatio, fillColor,
-                              outputMimetype, randomizeCollage, lowQualityOutput );
+                              outputMimetype, randomizeCollage, lowQualityOutput, highQualityScaling );
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
         else
@@ -3297,7 +3304,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     else
     {
         hr = ConvertImage( awcInput, awcOutput, longEdge, waveMethod, posterizeLevel, colorizationData, makeGreyscale,
-                           aspectRatio, fillColor, outputMimetype, lowQualityOutput, gameBoy );
+                           aspectRatio, fillColor, outputMimetype, lowQualityOutput, gameBoy, highQualityScaling );
         if ( SUCCEEDED( hr ) )
             printf( "output written successfully: %ws\n", awcOutput );
         else
