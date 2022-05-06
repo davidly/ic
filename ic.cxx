@@ -483,6 +483,62 @@ HRESULT ScaleWICBitmap( ComPtr<IWICBitmapSource> & source, int longEdge )
     return hr;
 } //ScaleWICBitmap
 
+HRESULT ClipWICBitmap( ComPtr<IWICBitmapSource> & source, int outputWidth, int outputHeight )
+{
+    UINT width, height;
+
+    HRESULT hr = source->GetSize( &width, &height );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't get size of input bitmap: %#x\n", hr );
+        return hr;
+    }
+
+    double targetAspectRatio = (double) outputWidth / (double) outputHeight;
+    double inputAspectRatio = (double) width / (double) height;
+
+    UINT targetWidth, targetHeight;
+    WICRect roiRect;
+
+    if ( targetAspectRatio >= inputAspectRatio )
+    {
+        roiRect.X = 0;
+        roiRect.Width = width;
+        roiRect.Height = (int) ( (double) width / targetAspectRatio );
+        roiRect.Y = ( height - roiRect.Height ) / 2;
+    }
+    else
+    {
+        roiRect.Y = 0;
+        roiRect.Height = height;
+        roiRect.Width = (int) ( (double) height * targetAspectRatio );
+        roiRect.X = ( width - roiRect.Width ) / 2;
+    }
+
+    //printf( "original dimensions %u by %u, clip.x %d, clip.width %d, clip.y %d, clip.height %d\n",
+    //        width, height, roiRect.X, roiRect.Width, roiRect.Y, roiRect.Height );
+
+    ComPtr<IWICBitmapClipper> clipper;
+    hr = g_IWICFactory->CreateBitmapClipper( clipper.GetAddressOf() );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't create a clipper: %#x\n", hr );
+        return hr;
+    }
+
+    hr = clipper->Initialize( source.Get(), &roiRect );
+    if ( FAILED( hr ) )
+    {
+        printf( "can't initialize clipper: %#x\n", hr );
+        return hr;
+    }
+
+    source.Reset();
+    source.Attach( clipper.Detach() );
+
+    return hr;
+} //ClipWICBitmap
+
 static int StrideInBytes( int width, int bitsPerPixel )
 {
     // Not sure if it's documented anywhere, but Windows seems to use 4-byte-aligned strides.
@@ -1666,7 +1722,7 @@ HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source
 HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & source, ComPtr<IWICBitmapFrameDecode> & frame,
                         int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
                         bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype,
-                        bool lowQualityOutput )
+                        bool lowQualityOutput, bool gameBoy )
 {
     ComPtr<IWICBitmapEncoder> encoder;
     ComPtr<IWICBitmapFrameEncode> bitmapFrameEncode;
@@ -1698,7 +1754,7 @@ HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & sour
 
     double originalAspectRatio = (double) width / (double) height;
 
-    if ( ( ( 0.0 == aspectRatio ) || SameDouble( aspectRatio, originalAspectRatio ) ) && ( 0 == posterizeLevel ) && ( 0 == waveMethod ) )
+    if ( !gameBoy && ( ( ( 0.0 == aspectRatio ) || SameDouble( aspectRatio, originalAspectRatio ) ) && ( 0 == posterizeLevel ) && ( 0 == waveMethod ) ) )
     {
         // This codepath is just an optimization for when it can be used. 
 
@@ -1803,11 +1859,49 @@ HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & sour
 
         tracer.Trace( "WriteWICBitmap: offsetx %d, offsety %d, wIn %d, hIn %d, wOut %d, hOut %d\n", offsetX, offsetY, wIn, hIn, wOut, hOut );
 
+        if ( gameBoy )
+        {
+            wOut = 128;
+            hOut = 112;
+            offsetX = 0;
+            offsetY = 0;
+
+            double targetAspectRatio = (double) wOut / (double) hOut;
+            double inputAspectRatio = (double) width / (double) height;
+
+            if ( targetAspectRatio >= inputAspectRatio )
+            {
+                wIn = wOut;
+                hIn = (int) ( (double) height * ( (double) wIn / (double) width ) );
+            }
+            else
+            {
+                hIn = hOut;
+                wIn = (int) ( (double) width * ( (double) hIn / (double) height ) );
+            }
+        }
+
         hr = ScaleWICBitmap( source, wIn > hIn ? wIn : hIn );
         if ( FAILED( hr ) )
         {
             printf( "failed to scale input bitmap %#x\n", hr );
             return hr;
+        }
+
+        if ( gameBoy )
+        {
+            hr = ClipWICBitmap( source, wOut, hOut );
+            if ( FAILED( hr ) )
+            {
+                printf( "failed to clip input bitmap: %#x\n", hr );
+                return hr;
+            }
+
+            wIn = wOut;
+            hIn = hOut;
+
+            makeGreyscale = true;
+            posterizeLevel = 4;
         }
 
         hr = bitmapFrameEncode->SetSize( wOut, hOut );
@@ -2521,7 +2615,7 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
 } //GenerateCollage
 
 HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
-                      bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool lowQualityOutput )
+                      bool makeGreyscale, double aspectRatio, int fillColor, WCHAR const * outputMimetype, bool lowQualityOutput, bool gameBoy )
 {
     ComPtr<IWICBitmapSource> source;
     ComPtr<IWICBitmapFrameDecode> frame;
@@ -2530,7 +2624,7 @@ HRESULT ConvertImage( WCHAR const * input, WCHAR const * output, int longEdge, i
     HRESULT hr = LoadWICBitmap( input, source, frame, force24bppBGR );
     if ( SUCCEEDED( hr ) )
         hr = WriteWICBitmap( output, source, frame, longEdge, waveMethod, posterizeLevel, colorizationData,
-                             makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput );
+                             makeGreyscale, aspectRatio, fillColor, outputMimetype, lowQualityOutput, gameBoy );
     
     frame.Reset();
     source.Reset();
@@ -2546,6 +2640,7 @@ void Usage( char * message = 0 )
     printf( "  Image Convert\n" );
     printf( "  arguments: <input>           The input image filename or path specifier for a collage.\n" );
     printf( "             -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.\n" );
+    printf( "             -b                Converts an image into a Game Boy Camera format: 128x112 and 4 shades of grey. Center crop if needed.\n" );
     printf( "             -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.\n" );
     printf( "             -c:1              Same as -c\n" );
     printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S pixel spacing. A arrangement (see below)\n" );
@@ -2820,6 +2915,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
 
     static WCHAR awcInput[ MAX_PATH ] = {0};
     static WCHAR awcOutput[ MAX_PATH ] = {0};
+    bool gameBoy = false;
     bool generateCollage = false;
     int collageMethod = 1;
     int collageColumns = 3;
@@ -2860,6 +2956,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
 
                 aspectRatio = ParseAspectRatio( parg + 3 );
             }
+            else if ( L'b' == p )
+                gameBoy = true;
             else if ( L'c' == p )
             {
                 generateCollage = true;
@@ -3199,7 +3297,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     else
     {
         hr = ConvertImage( awcInput, awcOutput, longEdge, waveMethod, posterizeLevel, colorizationData, makeGreyscale,
-                           aspectRatio, fillColor, outputMimetype, lowQualityOutput );
+                           aspectRatio, fillColor, outputMimetype, lowQualityOutput, gameBoy );
         if ( SUCCEEDED( hr ) )
             printf( "output written successfully: %ws\n", awcOutput );
         else
