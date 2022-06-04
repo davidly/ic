@@ -12,6 +12,7 @@
 //        use PPL for parallelization
 //        don't use sqrt() since it doesn't add value
 //        remove pre-loop-setup-iterations
+//        don't allocate vectors for point values
 //        better use the CPU cache by accessing memory in order
 //    to do:
 //        Add new run() method that takes a range of K, resulting in whichever K has the lowest standard deviations
@@ -29,13 +30,13 @@ class KMeansPoint
 {
     private:
         int pointId, clusterId;
-        vector<double> values;
+        static const int ValueCount = 3;
+        double values[ ValueCount ];
     
     public:
         KMeansPoint( int id, int r, int g, int b ) :
             pointId( id ),
-            clusterId( 0 ),  // not assigned to any cluster
-            values( 3, 0.0 )
+            clusterId( 0 )  // not assigned to any cluster
         {
             values[ 0 ] = (double) r / 255.0;
             values[ 1 ] = (double) g / 255.0;
@@ -51,26 +52,20 @@ class KMeansPoint
             return b | ( g << 8 ) | ( r << 16 );
         } //getBGR()
     
-        int getDimensions() { return values.size(); }
+        int dimensionCount() { return ValueCount; }
         int getCluster() { return clusterId; }
         int getID() { return pointId; }
         void setCluster( int val ) { clusterId = val; }
         double getVal( int pos ) { return values[ pos ]; }
         void setVal( int pos, double val ) { values[ pos ] = val; }
+
         double distance( KMeansPoint & other )
         {
             double sum = 0.0;
-            int dimensions = values.size();
-
-            for ( int j = 0; j < dimensions; j++ )
+            for ( int j = 0; j < ValueCount; j++ )
             {
                 double val = values[ j ] - other.getVal( j );
-
-                #ifdef KMEANS_USE_SQRT
-                    sum += ( val * val );
-                #else
-                    sum += abs( val );
-                #endif
+                sum += ( val * val );
             }
     
             #ifdef KMEANS_USE_SQRT
@@ -99,7 +94,7 @@ class KMeansCluster
         KMeansCluster( int id, KMeansPoint & cent ) :
             clusterId( id ),
             centroid( cent ),  // would like to remove this copy constructor usage
-            scoreScratchpad( cent.getDimensions() ) // handy place to sum scores
+            scoreScratchpad( cent.dimensionCount() ) // handy place to sum scores
         {
             assert( 0 != id );
             addPoint( cent );
@@ -107,10 +102,11 @@ class KMeansCluster
 
         static int compareClusters( const void * a, const void * b )
         {
-            // sort by size of cluster high to low
+            // sort by size of cluster (# of items contained) high to low
 
-            KMeansCluster * pa = (KMeansCluster *) a;
-            KMeansCluster * pb = (KMeansCluster *) b;
+            KMeansCluster const * pa = (KMeansCluster const *) a;
+            KMeansCluster const * pb = (KMeansCluster const *) b;
+
             return pb->points.size() - pa->points.size();
         } //compareClusters
     
@@ -180,7 +176,7 @@ class KMeans
             this->iters = iterations;
         } //KMeans
     
-        void run( vector<KMeansPoint> & all_points )
+        void run( vector<KMeansPoint> & all_points, int seed_iterations = 40 )
         {
             clusters.clear();
             total_points = all_points.size();
@@ -191,7 +187,10 @@ class KMeans
                 return;
             }
 
-            dimensions = all_points[ 0 ].getDimensions();
+            if ( seed_iterations <= 0 )
+                seed_iterations = 1;
+
+            dimensions = all_points[ 0 ].dimensionCount();
 
             if ( total_points == K )
             {
@@ -206,7 +205,7 @@ class KMeans
                 vector<int> best_pointIds( K );
                 double best_distance = 0.0;
                 int best_start = 0;
-                const int best_iterations = 40;
+                const int best_iterations = seed_iterations;
 
                 // try n times to find initial centroids that are as different from each other as possible
 
@@ -214,7 +213,7 @@ class KMeans
                 {
                     //printf( "pass %d\n", r );
                     vector<int> used_pointIds;
-    
+
                     for ( int i = 1; i <= K; i++ )
                     {
                         // this may be an infinite loop if rand() is badly behaved
@@ -231,6 +230,8 @@ class KMeans
                         }
                     }
 
+                    // see how far away each initial centroid is from every other initial centroid
+
                     double distance = 0;
                     for ( int i = 0; i < K; i++ )
                     {
@@ -241,6 +242,8 @@ class KMeans
                             //printf( "  so far: %lf total %lf\n", d, distance );
                         }
                     }
+
+                    // choose the one with the most total distance
 
                     //printf( "  distances for pass %d: %lf\n", r, distance );
 
@@ -292,7 +295,7 @@ class KMeans
                 //for ( int i = 0; i < total_points; i++ )
                 //    clusters[ all_points[ i ].getCluster() - 1 ].addPoint( all_points[ i ] );
 
-                // Recalculate the center of each cluster
+                // Recalculate the synthetic center of each cluster
 
                 //for ( int i = 0; i < K; i++ )
                 parallel_for( 0, K, [&] ( int i )
@@ -351,7 +354,7 @@ class KMeans
 
         void getbgrSynthetic( vector<DWORD> & centroids )
         {
-            // return the synthetic centoid value, which may not be found in the input dataset
+            // return the synthetic centoid values, which may not be found in the input dataset
 
             centroids.resize( K );
 
@@ -361,6 +364,51 @@ class KMeans
                 centroids[ i ] = cluster.getCentroid().getBGR();
             }
         } //getbgrSynthetic
+
+        double getbgrClosest( vector<DWORD> & closest, vector<int> & pointIDs )
+        {
+            // Return the actual values from the input dataset that are closest to the synthetic centroids
+            // Return value is the average standard deviation for each cluster.
+
+            closest.resize( K );
+            pointIDs.resize( K );
+            vector<double> distances( K );
+
+            //for ( int i = 0; i < K; i++ )
+            parallel_for( 0, K, [&] ( int i )
+            {
+                KMeansCluster & cluster = clusters[ i ];
+                KMeansPoint & centroid = cluster.getCentroid();
+                double min_dist = DBL_MAX;
+                int best = 0;
+
+                for ( int p = 0; p < cluster.getSize(); p++ )
+                {
+                    double dist = centroid.distance( cluster.getPoint( p ) );
+                    if ( dist < min_dist )
+                    {
+                        min_dist = dist;
+                        best = p;
+                    }
+                    distances[ i ] += dist;
+                }
+
+                KMeansPoint & point = cluster.getPoint( best );
+                closest[ i ] = point.getBGR();
+                pointIDs[ i ] = point.getID();
+                distances[ i ] /= cluster.getSize();
+                //printf( "cluster size: %d\n", cluster.getSize() );
+             } );
+
+             double sum = 0.0;
+             for ( int i = 0; i < K; i++ )
+                 sum += distances[ i ];
+             double avg = sum / K;
+
+             //printf( "average standard deviation: %lf\n", avg );
+
+             return avg;
+        } //getbgrClosest
 
         void getbgrClosest( vector<DWORD> & closest )
         {

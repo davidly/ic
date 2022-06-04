@@ -31,6 +31,7 @@ using namespace Microsoft::WRL;
 #include <djl_wav.hxx>
 #include <djl_kmeans.hxx>
 #include <djl_kdtree.hxx>
+#include <warp_sort.hxx>
 
 #pragma comment( lib, "ole32.lib" )
 #pragma comment( lib, "shlwapi.lib" )
@@ -51,7 +52,9 @@ long long g_ColorizeImageTime = 0;
 long long g_ShowColorsAllTime = 0;
 long long g_ShowColorsOpenTime = 0;
 long long g_ShowReadPixelsTime = 0;
-long long g_ShowColorsClusterTime = 0;
+long long g_ShowColorsFeaturizeClusterTime = 0;
+long long g_ShowColorsClusterRunTime = 0;
+long long g_ShowColorsPostClusterTime = 0;
 long long g_ShowColorsPaletteTime = 0;
 long long g_PosterizePixelsTime = 0;
 long long g_ReadPixelsTime = 0;
@@ -59,7 +62,7 @@ long long g_WritePixelsTime = 0;
 long long g_ShowColorsCopyTime = 0;
 long long g_ShowColorsSortTime = 0;
 long long g_ShowColorsUniqueTime = 0;
-long long g_ShowColorsClusterPrepTime = 0;
+long long g_ShowColorsClusterFeatureSelectionTime = 0;
 
 // 24bppBGR is convenient because:
 //    -- encoders support this format, and they don't all (e.g. JPG) support RGB
@@ -1284,86 +1287,99 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
 {
     // store all the colors in a DWORD vector, removing adjacent duplicates
 
-    CTimed timed1( g_ShowColorsCopyTime );
     vector<DWORD> colors;
-    T * row = p;
-    DWORD prevColor = 0xffffffff;
 
-    for ( int y = 0; y < height; y++ )
     {
-        T * pRow = row;
+        CTimed showColorsCopyTime( g_ShowColorsCopyTime );
+        T * row = p;
+        DWORD prevColor = 0xffffffff;
+        vector<DWORD> rowColors;
     
-        for ( int x = 0; x < width; x++ )
+        for ( int y = 0; y < height; y++ )
         {
-            byte r, g, b;
-
-            // The input/output image is either 24bppGBR or 48bppRGB
-
-            if ( 1 == sizeof( T ) )
+            rowColors.clear();
+            T * pixel = row;
+        
+            for ( int x = 0; x < width; x++ )
             {
-                b = pRow[ 0 ];
-                g = pRow[ 1 ];
-                r = pRow[ 2 ];
+                byte r, g, b;
+    
+                // The input/output image is either 24bppGBR or 48bppRGB
+    
+                if ( 1 == sizeof( T ) )
+                {
+                    b = pixel[ 0 ];
+                    g = pixel[ 1 ];
+                    r = pixel[ 2 ];
+                }
+                else
+                {
+                    assert( 2 == sizeof( T ) );
+    
+                    r = (byte) ( (unsigned short) pixel[ 0 ] >> 8 );
+                    g = (byte) ( (unsigned short) pixel[ 1 ] >> 8 );
+                    b = (byte) ( (unsigned short) pixel[ 2 ] >> 8 );
+                }
+    
+                DWORD color = b | ( g << 8 ) | ( r << 16 );
+    
+                if ( color != prevColor )
+                {
+                    colors.push_back( color );
+                    prevColor = color;
+                }
+    
+                pixel += 3;
             }
-            else
-            {
-                assert( 2 == sizeof( T ) );
-
-                r = (byte) ( (unsigned short) pRow[ 0 ] >> 8 );
-                g = (byte) ( (unsigned short) pRow[ 1 ] >> 8 );
-                b = (byte) ( (unsigned short) pRow[ 2 ] >> 8 );
-            }
-
-            DWORD color = b | ( g << 8 ) | ( r << 16 );
-
-            if ( color != prevColor )
-            {
-                colors.push_back( color );
-                prevColor = color;
-            }
-
-            pRow += 3;
+    
+            row += ( stride * sizeof( T ) );
         }
-
-        row += ( stride * sizeof T );
     }
 
-    timed1.Complete();
-    CTimed timed2( g_ShowColorsSortTime );
-    //qsort( colors.data(), colorsSoFar, sizeof( DWORD ), compare_colors );
-    std::sort( colors.begin(), colors.end() ); // 30% faster than qsort
-    timed2.Complete();
+    {
+        CTimed showColorsSortTime( g_ShowColorsSortTime );
+
+        //qsort( colors.data(), colors.size(), sizeof( DWORD ), compare_colors );
+
+         // 30% faster than qsort
+        //std::sort( colors.begin(), colors.end() );
+
+        // this sort is 20% faster than std::sort for interesting use cases
+        MedianHybridQuickSort( colors.data(), colors.size() );
+    }
 
     // copy unique colors
 
-    CTimed timed3( g_ShowColorsUniqueTime );
     vector<DWORD> uniqueColors;
-    prevColor = 0xffffffff;
 
-    for ( int i = 0; i < colors.size(); i++ )
     {
-        if ( colors[ i ] != prevColor )
+        CTimed showColorsUniqueTime( g_ShowColorsUniqueTime );
+        DWORD prevColor = 0xffffffff;
+    
+        for ( int i = 0; i < colors.size(); i++ )
         {
-            uniqueColors.push_back( colors[ i ] );
-            prevColor = colors[ i ];
+            if ( colors[ i ] != prevColor )
+            {
+                uniqueColors.push_back( colors[ i ] );
+                prevColor = colors[ i ];
+            }
         }
     }
 
-    timed3.Complete();
-
-    CTimed timed4( g_ShowColorsClusterPrepTime );
-
     showColorCount = __min( showColorCount, uniqueColors.size() );
+
     if ( printColors )
     {
-        printf( "pixels in image: %d\n", height * width );
-        printf( "first-pass unique: %zd\n", colors.size() );
-        printf( "unique colors: %zd\n", uniqueColors.size() );
-        printf( "shown colors: %d\n", showColorCount );
+        printf( "pixels in image:   %12d\n", height * width );
+        printf( "first-pass unique: %12zd\n", colors.size() );
+        printf( "unique colors:     %12zd\n", uniqueColors.size() );
+        printf( "shown colors:      %12d\n", showColorCount );
 
         //for ( int i = 0; i < uniqueColors.size(); i++ )
         //    printf( "  color %d: %#x\n", i, uniqueColors[ i ] );
     }
+
+    CTimed showColorsClusterFeatureSelectionTime( g_ShowColorsClusterFeatureSelectionTime );
 
     colors.clear();
 
@@ -1378,13 +1394,13 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
         for ( int i = 0; i < uniqueColors.size(); i++ )
             centroids.push_back( uniqueColors[ i ] );
 
-        timed4.Complete();
+        showColorsClusterFeatureSelectionTime.Complete();
     }
     else
     {
         int clusteredColorCount = __max( showColorCount, __min( sampleSize, uniqueColors.size() ) );
         if ( printColors )
-            printf( "clusteredColorCount: %d\n", clusteredColorCount );
+            printf( "clusteredColorCount: %10d\n", clusteredColorCount );
     
         vector<DWORD> clusteredColors( clusteredColorCount );
     
@@ -1393,43 +1409,53 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
             clusteredColors[ i ] = uniqueColors[ lrand() % uniqueColors.size() ];
 
         uniqueColors.clear();
-        timed4.Complete();
+        showColorsClusterFeatureSelectionTime.Complete();
 
         // cluster the sample set
     
-        CTimed timeCluster( g_ShowColorsClusterTime );
         vector<KMeansPoint> all_points;
-    
-        for ( int i = 0; i < clusteredColorCount; i++ )
         {
-            ColorBytes cb( clusteredColors[ i ] );
-            all_points.emplace_back( i, cb.r, cb.g, cb.b );
+            CTimed showColorsFeaturizeClusterTime( g_ShowColorsFeaturizeClusterTime );
+        
+            for ( int i = 0; i < clusteredColorCount; i++ )
+            {
+                ColorBytes cb( clusteredColors[ i ] );
+                all_points.emplace_back( i, cb.r, cb.g, cb.b );
+            }
         }
     
         const int iters = 100;
         const int K = showColorCount;
         KMeans kmeans( K, iters );
 
-        kmeans.run( all_points );
-        kmeans.sort();
-        //kmeans.getbgrSynthetic( centroids ); // get the synthetic color centroids; they may not be in actual image
-        kmeans.getbgrClosest( centroids );  // get the actual image colors closest to the centoids
+        {
+            CTimed showColorsClusterRunTime( g_ShowColorsClusterRunTime );
+            kmeans.run( all_points );
+        }
 
-        #ifndef NDEBUG // ensure clustering gave back colors from the original set
-            for ( int i = 0; i < centroids.size(); i++ )
-            {
-                bool found = false;
-                for ( int j = 0; j < clusteredColors.size(); j++ )
+        {
+            CTimed showColorsClusterRunTime( g_ShowColorsPostClusterTime );
+    
+            kmeans.sort();
+            //kmeans.getbgrSynthetic( centroids ); // get the synthetic color centroids; they may not be in actual image
+            kmeans.getbgrClosest( centroids );  // get the actual image colors closest to the centoids
+    
+            #ifndef NDEBUG // ensure clustering gave back colors from the original set
+                for ( int i = 0; i < centroids.size(); i++ )
                 {
-                    if ( centroids[ i ] == clusteredColors[ j ] )
+                    bool found = false;
+                    for ( int j = 0; j < clusteredColors.size(); j++ )
                     {
-                        found = true;
-                        break;
+                        if ( centroids[ i ] == clusteredColors[ j ] )
+                        {
+                            found = true;
+                            break;
+                        }
                     }
+                    assert( found );
                 }
-                assert( found );
-            }
-        #endif
+            #endif
+        }
     }
 
     if ( printColors )
@@ -3342,10 +3368,16 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             PrintStat( "  copy colors", g_ShowColorsCopyTime / CTimed::NanoPerMilli() );
             PrintStat( "  sort:", g_ShowColorsSortTime / CTimed::NanoPerMilli() );
             PrintStat( "  find unique:", g_ShowColorsUniqueTime / CTimed::NanoPerMilli() );
-            PrintStat( "  cluster prep:", g_ShowColorsClusterPrepTime / CTimed::NanoPerMilli() );
+            PrintStat( "  feature selection:", g_ShowColorsClusterFeatureSelectionTime / CTimed::NanoPerMilli() );
 
-            if ( 0 != g_ShowColorsClusterTime );
-                PrintStat( "  color clustering:", g_ShowColorsClusterTime / CTimed::NanoPerMilli() );
+            if ( 0 != g_ShowColorsFeaturizeClusterTime );
+                PrintStat( "  featurization:", g_ShowColorsFeaturizeClusterTime / CTimed::NanoPerMilli() );
+
+            if ( 0 != g_ShowColorsClusterRunTime );
+                PrintStat( "  cluster runtime:", g_ShowColorsClusterRunTime / CTimed::NanoPerMilli() );
+
+            if ( 0 != g_ShowColorsPostClusterTime );
+                PrintStat( "  post-processing:", g_ShowColorsPostClusterTime / CTimed::NanoPerMilli() );
 
             if ( 0 != g_ShowColorsPaletteTime )
                 PrintStat( "  palette file:", g_ShowColorsPaletteTime / CTimed::NanoPerMilli() );
