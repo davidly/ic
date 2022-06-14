@@ -2430,7 +2430,6 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
         
         tracer.Trace( "GenerateCollage: Path '%ws', File Specificaiton '%ws'\n", awcPath, awcSpec );
     
-        CPathArray pathArray;
         CEnumFolder enumPaths( false, &pathArray, NULL, 0 );
         enumPaths.Enumerate( awcPath, awcSpec );
     }
