@@ -10,6 +10,7 @@
 #include <wrl.h>
 #include <mferror.h>
 #include <psapi.h>
+#include <gdiplus.h>
 
 #include <stdio.h>
 #include <assert.h>
@@ -23,6 +24,7 @@ using namespace std;
 using namespace std::chrono;
 using namespace concurrency;
 using namespace Microsoft::WRL;
+using namespace Gdiplus;
 
 #include <djltrace.hxx>
 #include <djlenum.hxx>
@@ -39,8 +41,10 @@ using namespace Microsoft::WRL;
 #pragma comment( lib, "windowscodecs.lib" )
 #pragma comment( lib, "gdi32.lib" )
 #pragma comment( lib, "user32.lib" )
+#pragma comment( lib, "Gdiplus.lib" )
 
 CDJLTrace tracer;
+std::mutex g_mtx;
 ComPtr<IWICImagingFactory> g_IWICFactory;
 long long g_CollagePrepTime = 0;
 long long g_CollageStitchTime = 0;
@@ -1678,6 +1682,58 @@ HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & cen
     return hr;
 } //ShowColors
 
+void DrawCaption( const WCHAR * pwcPath, byte * pOut, int stride, int xOffset, int yOffset,
+                  int width, int height, int fullWidth, int fullHeight, int bpp )
+{
+    // GDI is single-threaded
+
+    lock_guard<mutex> lock( g_mtx );
+
+    // rgb vs bgr doesn't matter because text is black and white
+
+    PixelFormat pixelFormat = ( 24 == bpp ) ? PixelFormat24bppRGB : PixelFormat32bppRGB;
+
+    // Get just the filename from the path to use as a caption
+
+    WCHAR caption[ MAX_PATH ];
+    const WCHAR * slash = wcsrchr( pwcPath, L'\\' );
+    if ( slash )
+        wcscpy( caption, slash + 1 );
+    else
+        wcscpy( caption, pwcPath );
+
+    WCHAR * dot = wcsrchr( caption, L'.' );
+    if ( dot )
+        *dot = 0;
+
+    // Create a gdi+ bitmap and write the text. Use paths so multiple colors are used
+    // so that the text appears on any image instead of blending into similar colors.
+
+    Bitmap bitmap( fullWidth, fullHeight, stride, pixelFormat, pOut );
+
+    FontFamily fontFamily( L"Arial" );
+    Font font( &fontFamily, 12, FontStyleBold, UnitPoint );
+
+    StringFormat stringFormat;
+    stringFormat.SetAlignment( StringAlignmentCenter );
+    stringFormat.SetLineAlignment( StringAlignmentCenter );
+
+    RectF rect( (REAL) xOffset, (REAL) yOffset + (REAL) height * 3.0 / 4.0,
+                (REAL) width, (REAL) height / 4.0 );
+
+    Graphics graphics( & bitmap );
+    graphics.SetSmoothingMode( SmoothingModeAntiAlias );
+    graphics.SetInterpolationMode( InterpolationModeHighQualityBicubic );
+
+    GraphicsPath path;
+    path.AddString( caption, wcslen( caption ), &fontFamily, FontStyleRegular, height / 16, rect, &stringFormat );
+    Pen pen( Color( 255, 255, 255 ), 4 );
+    pen.SetLineJoin( LineJoinRound );
+    graphics.DrawPath( &pen, &path);
+    SolidBrush brush( Color( 0, 0, 0 ) );
+    graphics.FillPath( &brush, &path );
+} //DrawCaption
+
 // Note: this is effectively a blt -- there is no stretching or scaling.
 
 HRESULT DrawImage( byte * pOut, int strideOut, ComPtr<IWICBitmapSource> & source, int waveMethod, const WCHAR * pwcWAVBase,
@@ -2035,7 +2091,8 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
                        vector<BitmapDimensions> & dimensions, int columns,
                        int targetHeight, int targetWidth, int spacing, int imageWidth, int fillColor,
                        int posterizeLevel, ColorizationData * colorizationData, bool makeGreyscale,
-                       WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling )
+                       WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling,
+                       bool namesAsCaptions )
 {
     CTimed timeStitch( g_CollageStitchTime );
     ComPtr<IWICBitmapEncoder> encoder;
@@ -2119,6 +2176,10 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
         
             DrawImage( bufferOut.data(), strideOut, source, 0, pwcOutput, posterizeLevel, colorizationData, makeGreyscale,
                        xOffset, yOffset, width, height, g_BitsPerPixel, g_BitsPerPixel );
+
+            if ( namesAsCaptions )
+                DrawCaption( pathArray[ si ].pwcPath, bufferOut.data(), strideOut, xOffset, yOffset,
+                             width, height, targetWidth, targetHeight, g_BitsPerPixel );
         }
     });
 
@@ -2143,7 +2204,8 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
 HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<BitmapDimensions> & dimensions,
                        int imagesWide, int imagesHigh, int cellDX, int cellDY, int stitchDX, int stitchDY,
                        int fillColor, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
-                       bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling )
+                       bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling,
+                       bool namesAsCaptions )
 {
     CTimed timeStitch( g_CollageStitchTime );
     bool makeEverythingSquare = ( cellDX == cellDY );
@@ -2245,6 +2307,10 @@ HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<B
     
                     DrawImage( bufferOut.data(), strideOut, source, waveMethod, pwcOutput, posterizeLevel, colorizationData,
                                makeGreyscale, rectX, rectY, width, height, g_BitsPerPixel, g_BitsPerPixel );
+
+                    if ( namesAsCaptions )
+                        DrawCaption( pathArray[ curSource ].pwcPath, bufferOut.data(), strideOut, rectX, rectY,
+                                     width, height, stitchDX, stitchDY, g_BitsPerPixel );
                 }
             }
         });
@@ -2308,42 +2374,73 @@ void Randomize( vector<int> & elements, std::mt19937 & gen )
 HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
                          ColorizationData * colorizationData, bool makeGreyscale, int collageColumns, int collageSpacing,
                          bool collageSortByAspect, bool collageSpaced, double aspectRatio, int fillColor,
-                         WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput, bool highQualityScaling )
+                         WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput, bool highQualityScaling,
+                         bool namesAsCaptions )
 {
     CTimed timePrep( g_CollagePrepTime );
 
     if ( 0.0 == aspectRatio )
         aspectRatio = 1.0;
 
-    WCHAR awcPath[ MAX_PATH + 1 ];
-    WCHAR awcSpec[ MAX_PATH + 1 ];
-    
-    WCHAR * pwcSlash = wcsrchr( pwcInput, L'\\' );
-    
-    if ( NULL == pwcSlash )
+    CPathArray pathArray;
+    WCHAR * pwcDot = wcsrchr( pwcInput, L'.' );
+    if ( pwcDot && !wcsicmp( pwcDot, L".txt" ) )
     {
-        wcscpy( awcSpec, pwcInput );
-        _wfullpath( awcPath, L".\\", sizeof awcPath / sizeof WCHAR );
+        FILE * fp = _wfopen( pwcInput, L"r" );
+        if ( !fp )
+        {
+            printf( "can't open input file %ws\n", pwcInput );
+            exit( 0 );
+        }
+
+        char acPath[ MAX_PATH ];
+        while ( fgets( acPath, sizeof( acPath ), fp ) )
+        {
+            char * peol = strchr( acPath, '\r' );
+            if ( peol )
+                *peol = 0;
+            peol = strchr( acPath, '\n' );
+            if ( peol )
+                *peol = 0;
+
+            if ( 0 != acPath[ 0 ] )
+                pathArray.Add( acPath );
+        }
+
+        fclose( fp );
     }
     else
     {
-        wcscpy( awcSpec, pwcSlash + 1 );
-        *(pwcSlash + 1) = 0;
-        _wfullpath( awcPath, pwcInput, sizeof awcPath / sizeof WCHAR );
-    }
+        WCHAR awcPath[ MAX_PATH + 1 ];
+        WCHAR awcSpec[ MAX_PATH + 1 ];
+        
+        WCHAR * pwcSlash = wcsrchr( pwcInput, L'\\' );
+        
+        if ( NULL == pwcSlash )
+        {
+            wcscpy( awcSpec, pwcInput );
+            _wfullpath( awcPath, L".\\", sizeof awcPath / sizeof WCHAR );
+        }
+        else
+        {
+            wcscpy( awcSpec, pwcSlash + 1 );
+            *(pwcSlash + 1) = 0;
+            _wfullpath( awcPath, pwcInput, sizeof awcPath / sizeof WCHAR );
+        }
+        
+        tracer.Trace( "GenerateCollage: Path '%ws', File Specificaiton '%ws'\n", awcPath, awcSpec );
     
-    tracer.Trace( "GenerateCollage: Path '%ws', File Specificaiton '%ws'\n", awcPath, awcSpec );
-
-    CPathArray pathArray;
-    CEnumFolder enumPaths( false, &pathArray, NULL, 0 );
-    enumPaths.Enumerate( awcPath, awcSpec );
+        CPathArray pathArray;
+        CEnumFolder enumPaths( false, &pathArray, NULL, 0 );
+        enumPaths.Enumerate( awcPath, awcSpec );
+    }
 
     size_t fileCount = pathArray.Count();
     printf( "files found: %zd\n", fileCount );
 
     if ( 0 == fileCount )
     {
-        printf( "no files found in path %ws and pattern %ws\n", awcPath, awcSpec );
+        printf( "no files found in input %ws\n", pwcInput );
         return E_FAIL;
     }
 
@@ -2522,7 +2619,8 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
         printf( "collage will be %d by %d, each element %d by %d, and %d by %d images\n", stitchX, stitchY, minDXEdge, minDYEdge, imagesWide, imagesHigh );
     
         return StitchImages1( pwcOutput, pathArray, dimensions, imagesWide, imagesHigh, minDXEdge, minDYEdge, stitchX, stitchY,
-                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling );
+                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling,
+                              namesAsCaptions );
     }
 
     if ( 2 == collageMethod )
@@ -2636,7 +2734,8 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
 
         return StitchImages2( pwcOutput, pathArray, sortedIndexes, columnsToUse, yOffsets, dimensions, columns,
                               fullHeight, fullWidth, spacing, imageWidth, fillColor, posterizeLevel, colorizationData,
-                              makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling );
+                              makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling,
+                              namesAsCaptions );
     }
 
     return E_FAIL;
@@ -2667,7 +2766,7 @@ void Usage( char * message = 0 )
 
     printf( "usage: ic <input> /o:<filename>\n" );
     printf( "  Image Convert\n" );
-    printf( "  arguments: <input>           The input image filename or path specifier for a collage.\n" );
+    printf( "  arguments: <input>           The input image filename. Or for a collage a path specifier or .txt file with image paths\n" );
     printf( "             -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.\n" );
     printf( "             -b                Converts an image into a Game Boy Camera format: 128x112 and 4 shades of grey. Center crop if needed.\n" );
     printf( "             -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.\n" );
@@ -2702,6 +2801,7 @@ void Usage( char * message = 0 )
     printf( "    ic julien.jpg /o:julien_grey_posterized.tif /l:3000 /g /p:2 /w:1\n" );
     printf( "    ic picture.jpg /o:newpicture.jpg /l:2000 /a:5.2x3.9\n" );
     printf( "    ic *.jpg /c /o:c:\\collage.jpg /l:2000 /a:5x3 /f:0xff00aa88\n" );
+    printf( "    ic images_to_use.txt /c /o:c:\\collage.jpg /l:2000 /a:5x3 /f:0xff00aa88\n" );
     printf( "    ic d:\\pictures\\mitski\\*.jpg /c /o:mitski_collage.jpg /l:10000 /a:4x5\n" );
     printf( "    ic cheekface.jpg /s\n" );
     printf( "    ic cheekface.jpg /s:16 /o:top_16_colors.png\n" );
@@ -2952,6 +3052,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     int collageSpacing = 6;
     bool collageSortByAspect = false;
     bool collageSpaced = true;
+    bool namesAsCaptions = false;
     bool randomizeCollage = false;
     bool runtimeInfo = false;
     bool highQualityScaling = true;
@@ -3066,6 +3167,8 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                     Usage();
                 }
             }
+            else if ( L'n' == p )
+                namesAsCaptions = true;
             else if ( L'o' == p )
             {
                 if ( L':' != parg[2] )
@@ -3247,6 +3350,14 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
 
     tracer.Enable( enableTracing, L"ic.txt", clearTraceFile );
 
+    ULONG_PTR gdiplusToken = 0;
+
+    if ( namesAsCaptions )
+    {
+        GdiplusStartupInput si;
+        GdiplusStartup( &gdiplusToken, &si, NULL );
+    }
+
     // Create optimized data structures for specific color mapping scenarios
 
     if ( mapColor == cd.mapping || mapGradient == cd.mapping )
@@ -3321,7 +3432,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     {
         hr = GenerateCollage( collageMethod, awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
                               collageColumns, collageSpacing, collageSortByAspect, collageSpaced, aspectRatio, fillColor,
-                              outputMimetype, randomizeCollage, lowQualityOutput, highQualityScaling );
+                              outputMimetype, randomizeCollage, lowQualityOutput, highQualityScaling, namesAsCaptions );
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
         else
@@ -3339,6 +3450,9 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
             DeleteFile( awcOutput );
         }
     }
+
+    if ( gdiplusToken )
+        GdiplusShutdown( gdiplusToken );
 
     g_IWICFactory.Reset();
     CoUninitialize();
