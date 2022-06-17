@@ -44,7 +44,7 @@ using namespace Gdiplus;
 #pragma comment( lib, "Gdiplus.lib" )
 
 CDJLTrace tracer;
-std::mutex g_mtx;
+std::mutex g_mtxGDI;
 ComPtr<IWICImagingFactory> g_IWICFactory;
 long long g_CollagePrepTime = 0;
 long long g_CollageStitchTime = 0;
@@ -1480,6 +1480,10 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
 HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & centroids, bool printColors,
                     WCHAR const * pwcOutput = 0, WCHAR const * outputMimetype = 0 )
 {
+    // GDI is single-threaded
+
+    lock_guard<mutex> lock( g_mtxGDI );
+
     CTimed timedShowColorsAll( g_ShowColorsAllTime );
     CTimed timedShowColorsOpen( g_ShowColorsOpenTime );
 
@@ -1683,11 +1687,12 @@ HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & cen
 } //ShowColors
 
 void DrawCaption( const WCHAR * pwcPath, byte * pOut, int stride, int xOffset, int yOffset,
-                  int width, int height, int fullWidth, int fullHeight, int bpp )
+                  int width, int height, int fullWidth, int fullHeight, int bpp,
+                  bool fontSizeRelativeToWidth = true )
 {
     // GDI is single-threaded
 
-    lock_guard<mutex> lock( g_mtx );
+    lock_guard<mutex> lock( g_mtxGDI );
 
     // rgb vs bgr doesn't matter because text is black and white
 
@@ -1706,7 +1711,7 @@ void DrawCaption( const WCHAR * pwcPath, byte * pOut, int stride, int xOffset, i
     if ( dot )
         *dot = 0;
 
-    // Create a gdi+ bitmap and write the text. Use paths so multiple colors are used
+    // Create a gdi+ bitmap and write the text. Use paths for multiple colors
     // so that the text appears on any image instead of blending into similar colors.
 
     Bitmap bitmap( fullWidth, fullHeight, stride, pixelFormat, pOut );
@@ -1726,7 +1731,8 @@ void DrawCaption( const WCHAR * pwcPath, byte * pOut, int stride, int xOffset, i
     graphics.SetInterpolationMode( InterpolationModeHighQualityBicubic );
 
     GraphicsPath path;
-    path.AddString( caption, wcslen( caption ), &fontFamily, FontStyleRegular, height / 16, rect, &stringFormat );
+    int fontSize = ( fontSizeRelativeToWidth ? width : height ) / 16;
+    path.AddString( caption, wcslen( caption ), &fontFamily, FontStyleRegular, fontSize, rect, &stringFormat );
     Pen pen( Color( 255, 255, 255 ), 4 );
     pen.SetLineJoin( LineJoinRound );
     graphics.DrawPath( &pen, &path);
@@ -2309,8 +2315,8 @@ HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<B
                                makeGreyscale, rectX, rectY, width, height, g_BitsPerPixel, g_BitsPerPixel );
 
                     if ( namesAsCaptions )
-                        DrawCaption( pathArray[ curSource ].pwcPath, bufferOut.data(), strideOut, rectX, rectY,
-                                     width, height, stitchDX, stitchDY, g_BitsPerPixel );
+                        DrawCaption( pathArray[ curSource ].pwcPath, bufferOut.data(), strideOut, xOffset, yOffset,
+                                     cellDX, cellDY, stitchDX, stitchDY, g_BitsPerPixel );
                 }
             }
         });
