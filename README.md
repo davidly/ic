@@ -5,6 +5,12 @@ Useful for converting from one format to another (e.g. heic to jpg) or creating 
 
 The app uses k-means clustering for finding most common colors in images and a kd-tree for color mapping. The most common colors are written to stdout, but also an image can be created with a colorstrip and hex codes for each color.
 
+After converting to "Game Boy Camera" format, you may want to scale up the bitmap to a more visible size while turning off interpolation. That
+way the "pixels" are more visible. For example:
+
+    ic d:\pictures\sasquatch_2018\batch3\soccer_mommy.png /b /o:sm.png
+    ic sm.png /l:512 /o:sm512.png -h
+
 To build on Windows:
     
     Using a Visual Studio x64 Native Tools Command Prompt window, run m.bat
