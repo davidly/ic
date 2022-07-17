@@ -18,7 +18,7 @@ To build on Windows:
 usage: ic input /o:output
     
     Image Convert
-  arguments: <input>           The input image filename. Or for a collage a path specifier or .txt file with image paths
+    arguments: <input>           The input image filename. Or for a collage a path specifier or .txt file with image paths
              -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.
              -b                Converts an image into a Game Boy Camera format: 128x112 and 4 shades of grey. Center crop if needed.
              -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.
@@ -43,6 +43,7 @@ usage: ic input /o:output
              -zs               Same as -zc, but maps colors by matching saturation instead of color.
              -zh               Same as -zc, but maps colors by matching hue instead of color.
              -zg               Same as -zc, but maps colors by matching brightness gradient instead of color.
+    
     sample usage: (arguments can use - or /)
       ic picture.jpg /o:newpicture.jpg /l:800
       ic picture.jpg /p o:newpicture.jpg /l:800
