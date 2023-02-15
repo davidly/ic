@@ -22,13 +22,14 @@ usage: ic input /o:output
              -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.
              -b                Converts an image into a Game Boy Camera format: 128x112 and 4 shades of grey. Center crop if needed.
              -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.
-             -c:1              Same as -c
+             -c:1:C            Same as -c but also sorts images in the collage based on their primary color.
              -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S pixel spacing. A arrangement (see below)
              -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.
              -g                Greyscale the output image. Does not apply to the fillcolor.
              -h                Turn off HighQualityCubic scaling and use NearestNeighbor.
              -i                Show CPU and RAM usage.
              -l:<longedge>     Pixel count for the long edge of the output photo or for /c:2 the collage width.
+             -n                Use filenames as captions in collages.
              -o:<filename>     The output filename. Required argument. File will contain no exif info like GPS location.
              -p:x              Posterization level. 1..256 inclusive, Default 0 means none. # colors per channel.
              -q                Sacrifice image quality to produce a smaller JPG output file (4:2:2 not 4:4:4, 60% not 100%).
