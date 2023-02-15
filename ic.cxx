@@ -1285,23 +1285,44 @@ HRESULT PngFromVector( vector<DWORD> & vec, WCHAR const * pwcFile )
     return hr;
 } //PngFromVector
 
+struct ColorAndCount
+{
+    DWORD color;
+    DWORD count;
+};
+
+int compare_cac_color( const void * a, const void * b )
+{
+    ColorAndCount & caca = * (ColorAndCount *) a;
+    ColorAndCount & cacb = * (ColorAndCount *) b;
+
+    return ( caca.color > cacb.color ) ? -1 : ( caca.color == cacb.color ) ? 0 : 1;
+} //compare_cac_color
+
+int compare_cac_count( const void * a, const void * b )
+{
+    ColorAndCount & caca = * (ColorAndCount *) a;
+    ColorAndCount & cacb = * (ColorAndCount *) b;
+
+    return ( caca.count > cacb.count ) ? -1 : ( caca.count == cacb.count ) ? 0 : 1;
+} //compare_cac_count
+
 template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int width, int height,
                                               int showColorCount, vector<DWORD> & centroids,
                                               bool printColors )
 {
     // store all the colors in a DWORD vector, removing adjacent duplicates
 
-    vector<DWORD> colors;
+    vector<ColorAndCount> vcac;
 
     {
         CTimed showColorsCopyTime( g_ShowColorsCopyTime );
         T * row = p;
-        DWORD prevColor = 0xffffffff;
-        vector<DWORD> rowColors;
+        DWORD prevColor = 0xffffffff; // use a strange alpha value
+        int prevIndex = -1;
     
         for ( int y = 0; y < height; y++ )
         {
-            rowColors.clear();
             T * pixel = row;
         
             for ( int x = 0; x < width; x++ )
@@ -1327,10 +1348,20 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
     
                 DWORD color = b | ( g << 8 ) | ( r << 16 );
     
-                if ( color != prevColor )
+                if ( color == prevColor )
                 {
-                    colors.push_back( color );
+                    assert( -1 != prevIndex );
+                    vcac[ prevIndex ].count++;
+                }
+                else
+                {
+                    ColorAndCount cac;
+                    cac.color = color;
+                    cac.count = 1;
+                    vcac.push_back( cac );
+
                     prevColor = color;
+                    prevIndex = vcac.size() - 1;
                 }
     
                 pixel += 3;
@@ -1343,66 +1374,74 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
     {
         CTimed showColorsSortTime( g_ShowColorsSortTime );
 
-        //qsort( colors.data(), colors.size(), sizeof( DWORD ), compare_colors );
+        // std::sort is faster and MedianHybridQuickSort is even faster, but sorting over structs, not basic type
 
-         // 30% faster than qsort
-        //std::sort( colors.begin(), colors.end() );
-
-        // this sort is 20% faster than std::sort for interesting use cases
-        MedianHybridQuickSort( colors.data(), colors.size() );
+        qsort( vcac.data(), vcac.size(), sizeof( ColorAndCount ), compare_cac_color );
     }
 
-    // copy unique colors
+    // copy unique colors. update color count.
 
-    vector<DWORD> uniqueColors;
+    vector<ColorAndCount> unique_vcac;
 
     {
         CTimed showColorsUniqueTime( g_ShowColorsUniqueTime );
-        DWORD prevColor = 0xffffffff;
+        DWORD prevColor = 0xffffffff; // alpha value doesn't exist
+        int prevIndex = -1;
     
-        for ( int i = 0; i < colors.size(); i++ )
+        for ( int i = 0; i < vcac.size(); i++ )
         {
-            if ( colors[ i ] != prevColor )
+            if ( vcac[ i ].color == prevColor )
             {
-                uniqueColors.push_back( colors[ i ] );
-                prevColor = colors[ i ];
+                assert( -1 != prevIndex );
+                unique_vcac[ prevIndex ].count += vcac[ i ].count;
+            }
+            else
+            {
+                ColorAndCount cac;
+                cac.color = vcac[ i ].color;
+                cac.count = 1;
+                unique_vcac.push_back( cac );
+
+                prevColor = vcac[ i ].color;
+                prevIndex = unique_vcac.size() - 1;
             }
         }
     }
 
-    showColorCount = __min( showColorCount, uniqueColors.size() );
+    qsort( unique_vcac.data(), unique_vcac.size(), sizeof( ColorAndCount ), compare_cac_count );
+    showColorCount = __min( showColorCount, unique_vcac.size() );
 
     if ( printColors )
     {
         printf( "pixels in image:   %12d\n", height * width );
-        printf( "first-pass unique: %12zd\n", colors.size() );
-        printf( "unique colors:     %12zd\n", uniqueColors.size() );
+        printf( "first-pass unique: %12zd\n", vcac.size() );
+        printf( "unique colors:     %12zd\n", unique_vcac.size() );
         printf( "shown colors:      %12d\n", showColorCount );
 
-        //for ( int i = 0; i < uniqueColors.size(); i++ )
-        //    printf( "  color %d: %#x\n", i, uniqueColors[ i ] );
+        //for ( int i = 0; i < unique_vcac.size(); i++ )
+        //    printf( "  color %d: %08x, count %d\n", i, unique_vcac[ i ].color, unique_vcac[ i ].count );
     }
 
     CTimed showColorsClusterFeatureSelectionTime( g_ShowColorsClusterFeatureSelectionTime );
 
-    colors.clear();
+    vcac.clear();
 
     // get a sample set of the colors for clustering
 
     const int sampleSize = 10000;
 
-    if ( uniqueColors.size() <= showColorCount )
+    if ( unique_vcac.size() <= showColorCount )
     {
         // no need to cluster -- just use the unique colors
 
-        for ( int i = 0; i < uniqueColors.size(); i++ )
-            centroids.push_back( uniqueColors[ i ] );
+        for ( int i = 0; i < unique_vcac.size(); i++ )
+            centroids.push_back( unique_vcac[ i ].color );
 
         showColorsClusterFeatureSelectionTime.Complete();
     }
     else
     {
-        int clusteredColorCount = __max( showColorCount, __min( sampleSize, uniqueColors.size() ) );
+        int clusteredColorCount = __max( showColorCount, __min( sampleSize, unique_vcac.size() ) );
         if ( printColors )
             printf( "clusteredColorCount: %10d\n", clusteredColorCount );
     
@@ -1410,9 +1449,8 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
     
         srand( time( 0 ) );
         for ( int i = 0; i < clusteredColorCount; i++ )
-            clusteredColors[ i ] = uniqueColors[ lrand() % uniqueColors.size() ];
+            clusteredColors[ i ] = unique_vcac[ lrand() % unique_vcac.size() ].color;
 
-        uniqueColors.clear();
         showColorsClusterFeatureSelectionTime.Complete();
 
         // cluster the sample set
@@ -1440,25 +1478,40 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
         {
             CTimed showColorsClusterRunTime( g_ShowColorsPostClusterTime );
     
+            // it was sorted on counts; sort again on colors for lookups below
+            qsort( unique_vcac.data(), unique_vcac.size(), sizeof( ColorAndCount ), compare_cac_color );
+
             kmeans.sort();
+
             //kmeans.getbgrSynthetic( centroids ); // get the synthetic color centroids; they may not be in actual image
             kmeans.getbgrClosest( centroids );  // get the actual image colors closest to the centoids
-    
-            #ifndef NDEBUG // ensure clustering gave back colors from the original set
-                for ( int i = 0; i < centroids.size(); i++ )
+
+            vcac.resize( K );
+            vector<DWORD> items;
+            for ( int i = 0; i < K; i++ )
+            {
+                vcac[ i ].color = centroids[ i ];
+                kmeans.getClusterbgrItems( i, items );
+
+                vcac[ i ].count = 0;
+                for ( int e = 0; e < items.size(); e++ )
                 {
-                    bool found = false;
-                    for ( int j = 0; j < clusteredColors.size(); j++ )
-                    {
-                        if ( centroids[ i ] == clusteredColors[ j ] )
-                        {
-                            found = true;
-                            break;
-                        }
-                    }
-                    assert( found );
+                    ColorAndCount key;
+                    key.color = items[ e ];
+                    ColorAndCount * pcac = (ColorAndCount *) bsearch( &key, unique_vcac.data(), unique_vcac.size(), sizeof key, compare_cac_color );
+                    assert( 0 != pcac );
+
+                    vcac[ i ].count += pcac->count;
                 }
-            #endif
+            }
+
+            qsort( vcac.data(), vcac.size(), sizeof( ColorAndCount ), compare_cac_count );
+
+            for ( int i = 0; i < K; i++ )
+            {
+                centroids[ i ] = vcac[ i ].color;
+                tracer.Trace( "  centroid %d -- color %08x, count %d\n", i, vcac[ i ].color, vcac[ i ].count );
+            }
         }
     }
 
@@ -1477,72 +1530,76 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
     }
 } //ShowColorsFromBuffer
 
-HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & centroids, bool printColors,
-                    WCHAR const * pwcOutput = 0, WCHAR const * outputMimetype = 0 )
+HRESULT ShowColors( WCHAR const * input, int showColorCount, vector<DWORD> & centroids,
+                    bool printColors, WCHAR const * pwcOutput = 0, WCHAR const * outputMimetype = 0 )
 {
-    // GDI is single-threaded
-
-    lock_guard<mutex> lock( g_mtxGDI );
-
-    CTimed timedShowColorsAll( g_ShowColorsAllTime );
-    CTimed timedShowColorsOpen( g_ShowColorsOpenTime );
-
-    ComPtr<IWICBitmapSource> source;
-    ComPtr<IWICBitmapFrameDecode> frame;
-
-    HRESULT hr = LoadWICBitmap( input, source, frame, true );
-    if ( FAILED( hr ) )
-    {
-        printf( "can't load wic bitmap %#x\n", hr );
-        return hr;
-    }
-
+    vector<byte> bufferIn;
+    int bppIn, strideIn;
     UINT width = 0;
     UINT height = 0;
+    CTimed timedShowColorsAll( g_ShowColorsAllTime );
+    HRESULT hr = 0;
 
-    hr = source->GetSize( &width, &height );
-    if ( FAILED( hr ) )
     {
-        printf( "can't get dimensions of path %ws\n", input );
-        return hr;
-    }
-
-    timedShowColorsOpen.Complete();
-
-#if false // even though this can be much faster, WIC modifies colors when resizing, even if there are 2 colors!
-    const UINT maxSourceImageDimension = 1000;
-
-    if ( width > maxSourceImageDimension || height > maxSourceImageDimension )
-    {
-        hr = ScaleWICBitmap( source, maxSourceImageDimension );
+        // GDI is single-threaded
+    
+        lock_guard<mutex> lock( g_mtxGDI );
+        CTimed timedShowColorsOpen( g_ShowColorsOpenTime );
+    
+        ComPtr<IWICBitmapSource> source;
+        ComPtr<IWICBitmapFrameDecode> frame;
+    
+        hr = LoadWICBitmap( input, source, frame, true );
         if ( FAILED( hr ) )
         {
-            printf( "can't scale the input bitmap, error %#x\n", hr );
+            printf( "can't load wic bitmap %#x\n", hr );
             return hr;
         }
-
+    
         hr = source->GetSize( &width, &height );
         if ( FAILED( hr ) )
         {
-            printf( "can't get dimensions after scaling of path %ws\n", input );
+            printf( "can't get dimensions of path %ws\n", input );
             return hr;
         }
-    }
-#endif
-
-    CTimed showReadPixels( g_ShowReadPixelsTime );
-    int bppIn = g_BitsPerPixel;
-    int strideIn = StrideInBytes( width, bppIn );
-
-    int cbIn = strideIn * height;
-    vector<byte> bufferIn( cbIn );
-
-    hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.data() );
-    showReadPixels.Complete();
-    if ( FAILED( hr ) )
-    {
-        printf( "ShowColors() failed to read input pixels in CopyPixels() %#x\n", hr );
-        return hr;
+    
+        timedShowColorsOpen.Complete();
+    
+        #if false // even though this can be much faster, WIC modifies colors when resizing, even if there are 2 colors!
+            const UINT maxSourceImageDimension = 1000;
+        
+            if ( width > maxSourceImageDimension || height > maxSourceImageDimension )
+            {
+                hr = ScaleWICBitmap( source, maxSourceImageDimension );
+                if ( FAILED( hr ) )
+                {
+                    printf( "can't scale the input bitmap, error %#x\n", hr );
+                    return hr;
+                }
+        
+                hr = source->GetSize( &width, &height );
+                if ( FAILED( hr ) )
+                {
+                    printf( "can't get dimensions after scaling of path %ws\n", input );
+                    return hr;
+                }
+            }
+        #endif
+    
+        CTimed showReadPixels( g_ShowReadPixelsTime );
+        bppIn = g_BitsPerPixel;
+        strideIn = StrideInBytes( width, bppIn );
+    
+        int cbIn = strideIn * height;
+        bufferIn.resize( cbIn );
+    
+        hr = source->CopyPixels( 0, strideIn, cbIn, bufferIn.data() );
+        showReadPixels.Complete();
+        if ( FAILED( hr ) )
+        {
+            printf( "ShowColors() failed to read input pixels in CopyPixels() %#x\n", hr );
+            return hr;
+        }
     }
 
     ShowColorsFromBuffer( bufferIn.data(), bppIn, strideIn, width, height, showColorCount, centroids, printColors );
@@ -2209,9 +2266,9 @@ HRESULT StitchImages2( WCHAR const * pwcOutput, CPathArray & pathArray, vector<i
 
 HRESULT StitchImages1( WCHAR const * pwcOutput, CPathArray & pathArray, vector<BitmapDimensions> & dimensions,
                        int imagesWide, int imagesHigh, int cellDX, int cellDY, int stitchDX, int stitchDY,
-                       int fillColor, int waveMethod, int posterizeLevel, ColorizationData * colorizationData,
-                       bool makeGreyscale, WCHAR const * outputMimetype, bool lowQualityOutput, bool highQualityScaling,
-                       bool namesAsCaptions )
+                       int fillColor, int waveMethod, int posterizeLevel,
+                       ColorizationData * colorizationData, bool makeGreyscale, WCHAR const * outputMimetype,
+                       bool lowQualityOutput, bool highQualityScaling, bool namesAsCaptions )
 {
     CTimed timeStitch( g_CollageStitchTime );
     bool makeEverythingSquare = ( cellDX == cellDY );
@@ -2377,9 +2434,36 @@ void Randomize( vector<int> & elements, std::mt19937 & gen )
     }
 } //Randomize
 
+ULONG GetPrimaryHSV( const WCHAR * pwc )
+{
+    vector<DWORD> centroids;
+    ShowColors( pwc, 4, centroids, false, 0, 0 );
+    if ( 0 == centroids.size() )
+        return 0;
+
+    int h, s, v;
+    BGRToHSV( centroids[ 0 ], h, s, v );
+
+    return h << 16 | s << 8 | v;
+} //GetPrimaryHSV
+
+void SortPathArrayByColor( CPathArray & pathArray )
+{
+    parallel_for( (size_t) 0, pathArray.Count(), [&] ( size_t i )
+    //for ( size_t i = 0; i < pathArray.Count(); i++ )
+    {
+        pathArray[ i ].ulAttribute = GetPrimaryHSV( pathArray[ i ].pwcPath );
+    } );
+
+    pathArray.SortOnAttribute();
+
+    //for ( size_t i = 0; i < pathArray.Count(); i++ )
+    //    tracer.Trace( "hsv %08x, path %ws\n", pathArray[ i ].ulAttribute, pathArray[ i ].pwcPath );
+} //SortPathArrayByColor
+
 HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcOutput, int longEdge, int posterizeLevel,
                          ColorizationData * colorizationData, bool makeGreyscale, int collageColumns, int collageSpacing,
-                         bool collageSortByAspect, bool collageSpaced, double aspectRatio, int fillColor,
+                         bool collageSortByColor, bool collageSortByAspect, bool collageSpaced, double aspectRatio, int fillColor,
                          WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput, bool highQualityScaling,
                          bool namesAsCaptions )
 {
@@ -2454,6 +2538,8 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
 
     if ( randomizeCollage )
         pathArray.Randomize();
+    else if ( collageSortByColor )
+        SortPathArrayByColor( pathArray );
 
     vector<BitmapDimensions> dimensions( fileCount );
     HRESULT hr = S_OK;
@@ -2624,8 +2710,8 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
         printf( "collage will be %d by %d, each element %d by %d, and %d by %d images\n", stitchX, stitchY, minDXEdge, minDYEdge, imagesWide, imagesHigh );
     
         return StitchImages1( pwcOutput, pathArray, dimensions, imagesWide, imagesHigh, minDXEdge, minDYEdge, stitchX, stitchY,
-                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype, lowQualityOutput, highQualityScaling,
-                              namesAsCaptions );
+                              fillColor, 0, posterizeLevel, colorizationData, makeGreyscale, outputMimetype,
+                              lowQualityOutput, highQualityScaling, namesAsCaptions );
     }
 
     if ( 2 == collageMethod )
@@ -2775,13 +2861,14 @@ void Usage( char * message = 0 )
     printf( "             -a:<aspectratio>  Aspect ratio of output (widthXheight) (e.g. 3x2, 3x4, 16x9, 1x1, 8.51x3.14). Default 1x1 for collages.\n" );
     printf( "             -b                Converts an image into a Game Boy Camera format: 128x112 and 4 shades of grey. Center crop if needed.\n" );
     printf( "             -c                Generates a collage using method 1 (pack images + make square if not all the same aspect ratio.\n" );
-    printf( "             -c:1              Same as -c\n" );
+    printf( "             -c:1:C            Same as -c -- collage using method 1, but sorts images based on primary color\n" );
     printf( "             -c:2:C:S:A        Generate a collage using method 2 with C fixed-width columns and S pixel spacing. A arrangement (see below)\n" );
     printf( "             -f:<fillcolor>    Color fill for empty space. ARGB or RGB in hex. Default is black.\n" );
     printf( "             -g                Greyscale the output image. Does not apply to the fillcolor.\n" );
     printf( "             -h                Turn off HighQualityCubic scaling and use NearestNeighbor.\n" );
     printf( "             -i                Show CPU and RAM usage.\n" );
     printf( "             -l:<longedge>     Pixel count for the long edge of the output photo or for /c:2 the collage width.\n" );
+    printf( "             -n                show file Names as cations in collages.\n" );
     printf( "             -o:<filename>     The output filename. Required argument. File will contain no exif info like GPS location.\n" );
     printf( "             -p:x              Posterization level. 1..256 inclusive, Default 0 means none. # colors per channel.\n" );
     printf( "             -q                Sacrifice image quality to produce a smaller JPG output file (4:2:2 not 4:4:4, 60%% not 100%%).\n" );
@@ -3056,6 +3143,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     int collageColumns = 3;
     int collageSpacing = 6;
     bool collageSortByAspect = false;
+    bool collageSortByColor = false;
     bool collageSpaced = true;
     bool namesAsCaptions = false;
     bool randomizeCollage = false;
@@ -3106,7 +3194,14 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                     if ( collageMethod < 1 || collageMethod > 2 )
                         Usage( "collage method isn't valid" );
 
-                    if ( 2 == collageMethod )
+                    if ( 1 == collageMethod )
+                    {
+                        WCHAR const * pwcColon1 = wcschr( parg + 4, ':' );
+
+                        if ( 0 != pwcColon1 && ( 'c' == tolower( pwcColon1[ 1 ] ) ) )
+                            collageSortByColor = true;
+                    }
+                    else if ( 2 == collageMethod )
                     {
                         WCHAR const * pwcColon1 = wcschr( parg + 4, ':' );
                         WCHAR const * pwcColon2 = ( 0 != pwcColon1 ) ? wcschr( pwcColon1 + 1, ':' ) : 0;
@@ -3436,7 +3531,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     else if ( generateCollage )
     {
         hr = GenerateCollage( collageMethod, awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
-                              collageColumns, collageSpacing, collageSortByAspect, collageSpaced, aspectRatio, fillColor,
+                              collageColumns, collageSpacing, collageSortByColor, collageSortByAspect, collageSpaced, aspectRatio, fillColor,
                               outputMimetype, randomizeCollage, lowQualityOutput, highQualityScaling, namesAsCaptions );
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
