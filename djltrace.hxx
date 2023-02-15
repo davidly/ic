@@ -9,6 +9,11 @@
 //    tracer.Trace( "what to log with an integer argument %d and a wide string %ws\n", 10, pwcHello );
 //
 
+#ifndef UNICODE
+#define UNICODE
+#endif
+
+#include <windows.h>
 #include <stdio.h>
 #include <mutex>
 
@@ -19,9 +24,11 @@ class CDJLTrace
     private:
         FILE * fp;
         std::mutex mtx;
+        bool quiet; // no pid and tid
+        bool flush; // flush after each write
 
     public:
-        CDJLTrace() : fp( NULL ) {}
+        CDJLTrace() : fp( NULL ), quiet( false ), flush( true ) {}
 
         bool Enable( bool enable, const WCHAR * pwcLogFile = NULL, bool destroyContents = false )
         {
@@ -59,6 +66,7 @@ class CDJLTrace
         {
             if ( NULL != fp )
             {
+                fflush( fp );
                 fclose( fp );
                 fp = NULL;
             }
@@ -69,6 +77,12 @@ class CDJLTrace
             Shutdown();
         } //~CDJLTrace
 
+        bool IsEnabled() { return ( 0 != fp ); }
+
+        void SetQuiet( bool q ) { quiet = q; }
+
+        void SetFlushEachTrace( bool f ) { flush = f; }
+
         void Trace( const char * format, ... )
         {
             if ( NULL != fp )
@@ -77,10 +91,12 @@ class CDJLTrace
 
                 va_list args;
                 va_start( args, format );
-                fprintf( fp, "PID %6d TID %6d -- ", GetCurrentProcessId(), GetCurrentThreadId() );
+                if ( !quiet )
+                    fprintf( fp, "PID %6d TID %6d -- ", GetCurrentProcessId(), GetCurrentThreadId() );
                 vfprintf( fp, format, args );
                 va_end( args );
-                fflush( fp );
+                if ( flush )
+                    fflush( fp );
             }
         } //Trace
 
@@ -96,7 +112,8 @@ class CDJLTrace
                 va_start( args, format );
                 vfprintf( fp, format, args );
                 va_end( args );
-                fflush( fp );
+                if ( flush )
+                    fflush( fp );
             }
         } //TraceQuiet
 
@@ -109,10 +126,12 @@ class CDJLTrace
 
                 va_list args;
                 va_start( args, format );
-                fprintf( fp, "PID %6d TID %6d -- ", GetCurrentProcessId(), GetCurrentThreadId() );
+                if ( !quiet )
+                    fprintf( fp, "PID %6d TID %6d -- ", GetCurrentProcessId(), GetCurrentThreadId() );
                 vfprintf( fp, format, args );
                 va_end( args );
-                fflush( fp );
+                if ( flush )
+                    fflush( fp );
             }
             #endif
         } //TraceDebug

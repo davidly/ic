@@ -32,11 +32,11 @@
 using namespace std;
 
 /*
-   1 = BYTE An 8-bit unsigned integer.,
-   2 = ASCII An 8-bit byte containing one 7-bit ASCII code. The final byte is terminated with NULL.,
-   3 = SHORT A 16-bit (2-byte) unsigned integer,
-   4 = LONG A 32-bit (4-byte) unsigned integer,
-   5 = RATIONAL Two LONGs. The first LONG is the numerator and the second LONG expresses the denominator.,
+   1 = BYTE An 8-bit unsigned integer
+   2 = ASCII An 8-bit byte containing one 7-bit ASCII code. The final byte is terminated with NULL
+   3 = SHORT A 16-bit (2-byte) unsigned integer
+   4 = LONG A 32-bit (4-byte) unsigned integer
+   5 = RATIONAL Two LONGs. The first LONG is the numerator and the second LONG the denominator
    6 = no official definition, but used as an unsigned BYTE
    7 = UNDEFINED An 8-bit byte that can take any value depending on the field definition,
    8 = no official definition. Nokia uses it as an integer to represent ISO. Use as type 4.
@@ -174,6 +174,8 @@ private:
     char g_acModel[ 100 ];
     char g_acSerialNumber[ 100 ];
     bool g_holdsAdobeEditsInXMP;
+    __int64 g_RatingInXMP_Offset = 0; // offset of 1 ascii character in the range of 0-5.
+    int g_RatingInXMP = 0;
     
     WORD FixEndianWORD( WORD w, bool littleEndian )
     {
@@ -606,6 +608,16 @@ private:
                     ULONG stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                     GetString( stringOffset + tagHeaderBase + headerBase, g_acSerialNumber, _countof( g_acSerialNumber ), head.count );
                     //tracer.Trace( "fujifilm makernote (alternate) Serial #: %s\n", g_acSerialNumber );
+                }
+                else if ( 5169 == head.id && 4 == head.type )
+                {
+                    // This is rarely populated and not relevant.
+                    // If rating is set in-camera (on a X-S10), the xmp in the embedded JPG has the rating set appropriately,
+                    // but this field does not exist.
+
+                    size_t ratingOffset = head.offset + tagHeaderBase + headerBase;
+                    DWORD ratingTest = GetDWORD( ratingOffset, false );
+                    //tracer.Trace( "fujifilm rating value %d and offset: %zd, rating at that offset %d\n", head.offset, ratingOffset, ratingTest );
                 }
             }
     
@@ -1265,6 +1277,44 @@ private:
         } while ( true );
     } //EnumerateFlac
     
+    void EnumerateXMPData( const char * pcIn, ULONGLONG fileOffset )
+    {
+        // look for known xml tags rather than exhaustively parse the xml
+    
+        const char * pcTag = "xmp:Rating>";
+        const char * pcRating = strstr( pcIn, pcTag );
+
+        if ( !pcRating )
+        {
+            // jpg and Sony RAW ARW files will have this form
+    
+            pcTag = "xmp:Rating=\"";
+            pcRating = strstr( pcIn, pcTag );
+        }
+
+        if ( !pcRating )
+        {
+            // Hasselblad RAW files have this form
+    
+            pcTag = "xap:Rating>";
+            pcRating = strstr( pcIn, pcTag );
+        }
+
+        if ( pcRating )
+        {
+            pcRating += strlen( pcTag );
+            char rating = *pcRating;
+
+            if ( rating >= '0' && rating <= '5'  )       // doesn't handle Adobe Bridge's -1
+            {
+                g_RatingInXMP = rating - '0';
+                g_RatingInXMP_Offset = fileOffset + ( pcRating - pcIn );
+            }
+            else
+                tracer.Trace( "XMP rating value isn't a character 0 to 5: '%c' == %#x\n", rating, rating );
+        }
+    } //EnumerateXMPData
+
     class HeifStream
     {
         private:
@@ -1331,6 +1381,14 @@ private:
     
                 return b;
             } //GetBYTE
+
+            void GetBytes( __int64 & streamOffset, void * pData, int byteCount )
+            {
+                memset( pData, 0, byteCount );
+    
+                if ( pStream->Seek( offset + streamOffset ) )
+                    pStream->Read( pData, byteCount );
+            }
     }; //HeifStream
     
     // Heif and CR3 use ISO Base Media File Format ISO/IEC 14496-12. This function walks those files and pulls out data including Exif offsets
@@ -1626,6 +1684,17 @@ private:
     
                     EnumerateBoxes( hsChild, depth + 1 );
                 }
+
+                if ( !strcmp( "be7acfcb97a942e89c71999491e3afac", acGUID ) )
+                {
+                    // Adobe XMP data
+    
+                    ULONGLONG xmpLen = boxLen - ( offset - boxOffset );
+                    unique_ptr<char> bytes( new char[ xmpLen + 1 ] );
+                    bytes.get()[ xmpLen ] = 0; // ensure it'll be null-terminated
+                    hs.GetBytes( offset, bytes.get(), xmpLen );
+                    EnumerateXMPData( bytes.get(), offset );
+                }
             }
             else if ( !strcmp( tag, "CMT1" ) )
             {
@@ -1856,11 +1925,13 @@ private:
 
                     if ( head.count > 4 && head.count < 65536 )
                     {
-                        unique_ptr<byte> bytes( new byte[ head.count + 1 ] );
+                        unique_ptr<char> bytes( new char[ head.count + 1 ] );
                         bytes.get()[ head.count ] = 0; // ensure it'll be null-terminated
                         GetBytes( head.offset + headerBase, bytes.get(), head.count );
-                        if ( strstr( (char *) bytes.get(), "Adobe XMP Core" ) )
+                        if ( strstr( bytes.get(), "Adobe XMP Core" ) )
                             g_holdsAdobeEditsInXMP = true;
+
+                        EnumerateXMPData( bytes.get(), head.offset + headerBase );
                     }
                 }
                 else if ( 34665 == head.id )
@@ -1903,7 +1974,7 @@ private:
         }
     } //EnumerateIFD0
     
-    int ParseOldJpg( bool embedded = false )
+    int ParseOldJpg( bool embedded = false, DWORD startingOffset = 0 )
     {
         int exifOffset = 0;
 
@@ -1921,7 +1992,7 @@ private:
         const BYTE MARKER_EOI   = 0xd9;          // end of image
         const BYTE MARKER_COM   = 0xfe;          // comment
     
-        DWORD offset = 2;
+        DWORD offset = 2 + startingOffset;
 
         #pragma pack(push, 1)
         struct JpgRecord
@@ -1972,6 +2043,9 @@ private:
                 continue;
             }
     
+            WORD length = GetWORD( offset + 2, false );
+            WORD data_length = length - 2;
+
             if ( MARKER_DHT == record.segment || MARKER_JPG == record.segment || MARKER_DAC == record.segment )
             {
                 // These 3 fall in the range of the valid SOF? segments, so watch for them and ignore
@@ -2009,6 +2083,17 @@ private:
                     // just return the exifoffset so it can be parsed later
 
                     exifOffset = offset + 8;
+                }
+                else if ( !stricmp( app1Header, "http" ) )
+                {
+                    // there will be a null-terminated header string then another string with xmp data
+    
+                    unique_ptr<char> bytes( new char[ data_length + 1 ] );
+                    GetBytes( (__int64) offset + 4, bytes.get(), data_length );
+                    bytes.get()[ data_length ] = 0;
+                    int headerlen = strlen( bytes.get() );
+    
+                    EnumerateXMPData( bytes.get() + headerlen + 1, ( offset + 4 + headerlen + 1 ) );
                 }
             }
     
@@ -2106,7 +2191,7 @@ private:
         BITMAPV5HEADER bih;
         GetBytes( sizeof bfh, &bih, sizeof bih );
 
-        tracer.Trace( "parsed bmp: embedded %d, width %d, height %d\n", embedded, bih.bV5Width, bih.bV5Height );
+        //tracer.Trace( "parsed bmp: embedded %d, width %d, height %d\n", embedded, bih.bV5Width, bih.bV5Height );
 
         if ( embedded )
         {
@@ -2658,6 +2743,9 @@ private:
             // RAF files aren't like TIFF files. They have their own format which isn't documented and this app can't parse.
             // But RAF files have an embedded JPG with full properties, so show those.
             // https://libopenraw.freedesktop.org/formats/raf/
+            // Also, the rating in the xmp data of the embedded JPG is what Lightroom uses when importing a RAF file.
+            // Any rating stored elsewhere in native RAF format is ignored by this code since Lightroom honors the
+            // more simple and documented version.
     
             DWORD jpgOffset = GetDWORD( 84, false );
             DWORD jpgLength = GetDWORD( 88, false );
@@ -2669,6 +2757,8 @@ private:
                 return;
             }
     
+            int exifMaybe = ParseOldJpg( false, jpgOffset );
+
             DWORD exifSig = GetDWORD( jpgOffset + exifHeaderOffset, true );
     
             if ( 0x002a4949 != exifSig )
@@ -2901,6 +2991,8 @@ private:
         g_acModel[ 0 ] = 0;
         g_acSerialNumber[ 0 ] = 0;
         g_holdsAdobeEditsInXMP = false;
+        g_RatingInXMP_Offset = 0; // offset of 1 ascii character in the range of 0-5.
+        g_RatingInXMP = 0;        // integer 0..5 only valid if g_RatingInXMP_Offset isn't 0
     } //InitializeGlobals
     
     void UpdateCache( const WCHAR * pwcPath )
@@ -3210,6 +3302,9 @@ public:
     
     //    if ( -1 != g_ComputedSensorWidth && -1 != g_ComputedSensorHeight )
     //        current += sprintf_s( current, past - current, "sensor %dx%dmm\n", g_ComputedSensorWidth, g_ComputedSensorHeight );
+
+        if ( 0 != g_RatingInXMP_Offset )
+            current += sprintf_s( current, past - current, "rating: %d\n", g_RatingInXMP );
     
         // remove the trailing newline
     
@@ -3323,6 +3418,122 @@ public:
 
         return g_holdsAdobeEditsInXMP;
     } //HoldsAdobeEditsInXMP
+
+    bool GetRating( const WCHAR * pwcPath, int & rating )
+    {
+        UpdateCache( pwcPath );
+
+        if ( 0 == g_RatingInXMP_Offset )
+        {
+            //tracer.Trace( "file has no rating field\n" );
+            return false;
+        }
+
+        rating = g_RatingInXMP;
+        return true;
+    } //GetRating
+
+    bool ToggleRating( const WCHAR * pwcPath )
+    {
+        // If the file can hold a rating, increment it by 1. If it's already 5, set it to 0.
+
+        UpdateCache( pwcPath );
+
+        if ( 0 == g_RatingInXMP_Offset )
+        {
+            tracer.Trace( "file has no rating field, so it can't be updated\n" );
+            return false;
+        }
+
+        int newRating = 0;
+
+        if ( ( g_RatingInXMP >= 0 ) && ( g_RatingInXMP <= 4 ) )
+            newRating = 1 + g_RatingInXMP;
+        else
+            newRating = 0;
+
+        HANDLE hFile = CreateFile( pwcPath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+        if ( INVALID_HANDLE_VALUE == hFile )
+        {
+            tracer.Trace( "can't open file for write to update rating, error %d\n", GetLastError() );
+            return false;
+        }
+
+        LARGE_INTEGER li;
+        li.QuadPart = g_RatingInXMP_Offset;
+        bool ok = SetFilePointerEx( hFile, li, NULL, FILE_BEGIN );
+
+        if ( ok )
+        {
+            DWORD written = 0;
+            char rating = '0' + newRating;
+            ok = WriteFile( hFile, &rating, sizeof rating, &written, NULL );
+
+            if ( ok )
+            {
+                tracer.Trace( "updated rating at offset %lld to %c\n", g_RatingInXMP_Offset, rating );
+                g_RatingInXMP = newRating;
+            }
+            else
+                tracer.Trace( "can't write new rating to file, error %d\n", GetLastError() );
+        }
+        else
+        {
+            tracer.Trace( "can't set file pointer to update rating, error %d\n", GetLastError() );
+        }
+
+        CloseHandle( hFile );
+        return ok;
+    } //ToggleRating
+
+    bool SetRating( const WCHAR * pwcPath, int rating )
+    {
+        // If the file can hold a rating, set it to the value as a character
+
+        if ( rating < 0 || rating > 5 )
+            return false;
+
+        UpdateCache( pwcPath );
+
+        if ( 0 == g_RatingInXMP_Offset )
+        {
+            tracer.Trace( "file has no rating field, so it can't be updated\n" );
+            return false;
+        }
+
+        HANDLE hFile = CreateFile( pwcPath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+        if ( INVALID_HANDLE_VALUE == hFile )
+        {
+            tracer.Trace( "can't open file for write to update rating, error %d\n", GetLastError() );
+            return false;
+        }
+
+        LARGE_INTEGER li;
+        li.QuadPart = g_RatingInXMP_Offset;
+        bool ok = SetFilePointerEx( hFile, li, NULL, FILE_BEGIN );
+
+        if ( ok )
+        {
+            DWORD written = 0;
+            char charRating = '0' + rating;
+            ok = WriteFile( hFile, &charRating, sizeof charRating, &written, NULL );
+
+            if ( ok )
+            {
+                tracer.Trace( "updated rating at offset %lld to %c\n", g_RatingInXMP_Offset, charRating );
+                g_RatingInXMP = rating;
+            }
+            else
+                tracer.Trace( "can't write new rating to file, error %d\n", GetLastError() );
+        }
+        else
+        {
+            tracer.Trace( "can't set file pointer to update rating, error %d\n", GetLastError() );
+        }
+
+        CloseHandle( hFile );
+        return ok;
+    } //SetRating
 
     bool RotateImage( const WCHAR * pwcPath, bool rotateRight )
     {

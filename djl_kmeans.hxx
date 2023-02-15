@@ -439,5 +439,15 @@ class KMeans
              } );
 
         } //getbgrClosest
+
+        void getClusterbgrItems( int c, vector<DWORD> & items )
+        {
+            assert( c < K );
+            KMeansCluster & cluster = clusters[ c ];
+            items.resize( cluster.getSize() );
+
+            for ( int i = 0; i < cluster.getSize(); i++ )
+                items[ i ] = cluster.getPoint( i ).getBGR();
+        } //getCluserbgrItems
 };
 
