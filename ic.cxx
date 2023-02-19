@@ -33,7 +33,8 @@ using namespace Gdiplus;
 #include <djl_wav.hxx>
 #include <djl_kmeans.hxx>
 #include <djl_kdtree.hxx>
-#include <warp_sort.hxx>
+#include <djl_common.hxx>
+//#include <warp_sort.hxx>
 
 #pragma comment( lib, "ole32.lib" )
 #pragma comment( lib, "shlwapi.lib" )
@@ -192,13 +193,6 @@ void BGRToHSV( DWORD color, int & h, int & s, int & v )
     int r = ( color >> 16 ) & 0xff;
     RGBToHSV( r, g, b, h, s, v );
 } //BGRToHSV
-
-template <class T> void Swap( T & a, T & b )
-{
-    T c = a;
-    a = b;
-    b = c;
-} //Swap
 
 int compare_brightness( const void * a, const void * b )
 {
@@ -446,7 +440,6 @@ HRESULT CopyMetadata( ComPtr<IWICBitmapFrameEncode> encoder, ComPtr<IWICBitmapFr
 HRESULT ScaleWICBitmap( ComPtr<IWICBitmapSource> & source, int longEdge, bool highQualityScaling )
 {
     UINT width, height;
-
     HRESULT hr = source->GetSize( &width, &height );
     if ( FAILED( hr ) )
     {
@@ -1411,12 +1404,17 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
     qsort( unique_vcac.data(), unique_vcac.size(), sizeof( ColorAndCount ), compare_cac_count );
     showColorCount = __min( showColorCount, unique_vcac.size() );
 
+    // get a sample set of the colors for clustering
+
+    const int sampleSize = 20000;
+
     if ( printColors )
     {
         printf( "pixels in image:   %12d\n", height * width );
         printf( "first-pass unique: %12zd\n", vcac.size() );
         printf( "unique colors:     %12zd\n", unique_vcac.size() );
         printf( "shown colors:      %12d\n", showColorCount );
+        printf( "sample size:       %12d\n", sampleSize );
 
         //for ( int i = 0; i < unique_vcac.size(); i++ )
         //    printf( "  color %d: %08x, count %d\n", i, unique_vcac[ i ].color, unique_vcac[ i ].count );
@@ -1425,10 +1423,6 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
     CTimed showColorsClusterFeatureSelectionTime( g_ShowColorsClusterFeatureSelectionTime );
 
     vcac.clear();
-
-    // get a sample set of the colors for clustering
-
-    const int sampleSize = 10000;
 
     if ( unique_vcac.size() <= showColorCount )
     {
@@ -1448,8 +1442,11 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
         vector<DWORD> clusteredColors( clusteredColorCount );
     
         srand( time( 0 ) );
+        vector<ColorAndCount> randomized_uvcac( unique_vcac );
+        Randomize( randomized_uvcac );
+
         for ( int i = 0; i < clusteredColorCount; i++ )
-            clusteredColors[ i ] = unique_vcac[ lrand() % unique_vcac.size() ].color;
+            clusteredColors[ i ] = randomized_uvcac[ i ].color;
 
         showColorsClusterFeatureSelectionTime.Complete();
 
@@ -1479,8 +1476,17 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
             CTimed showColorsClusterRunTime( g_ShowColorsPostClusterTime );
     
             // it was sorted on counts; sort again on colors for lookups below
+
             qsort( unique_vcac.data(), unique_vcac.size(), sizeof( ColorAndCount ), compare_cac_color );
 
+            #ifndef NDEBUG
+            for ( size_t i = 0; i < unique_vcac.size(); i++ )
+            {
+                if ( i != ( unique_vcac.size() - 1 ) )
+                    assert( unique_vcac[ i ].color != unique_vcac[ i + 1 ].color );
+            }
+            #endif
+    
             kmeans.sort();
 
             //kmeans.getbgrSynthetic( centroids ); // get the synthetic color centroids; they may not be in actual image
@@ -1491,16 +1497,16 @@ template <class T> void ShowColorsFromBuffer( T * p, int bpp, int stride, int wi
             for ( int i = 0; i < K; i++ )
             {
                 vcac[ i ].color = centroids[ i ];
+                vcac[ i ].count = 0;
                 kmeans.getClusterbgrItems( i, items );
 
-                vcac[ i ].count = 0;
                 for ( int e = 0; e < items.size(); e++ )
                 {
                     ColorAndCount key;
                     key.color = items[ e ];
                     ColorAndCount * pcac = (ColorAndCount *) bsearch( &key, unique_vcac.data(), unique_vcac.size(), sizeof key, compare_cac_color );
                     assert( 0 != pcac );
-
+                    assert( pcac->color == items[ e ] );
                     vcac[ i ].count += pcac->count;
                 }
             }
@@ -1953,7 +1959,7 @@ HRESULT WriteWICBitmap( WCHAR const * pwcOutput, ComPtr<IWICBitmapSource> & sour
 
         if ( 0 != longEdge )
         {
-            // Don't allow scaling to a resolution larger than the original
+            // Don't allow scaling to a resolution larger than the original (that upscaling is accounted for elsewhere)
 
             if ( longEdge > width && longEdge > height )
                 longEdge = __max( width, height );
@@ -2465,7 +2471,7 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
                          ColorizationData * colorizationData, bool makeGreyscale, int collageColumns, int collageSpacing,
                          bool collageSortByColor, bool collageSortByAspect, bool collageSpaced, double aspectRatio, int fillColor,
                          WCHAR const * outputMimetype, bool randomizeCollage, bool lowQualityOutput, bool highQualityScaling,
-                         bool namesAsCaptions )
+                         bool namesAsCaptions, double expandCollageImages )
 {
     CTimed timePrep( g_CollagePrepTime );
 
@@ -2603,6 +2609,15 @@ HRESULT GenerateCollage( int collageMethod, WCHAR * pwcInput, const WCHAR * pwcO
                 break;
             }
         }
+    }
+
+    // by default, the output is limited by the lowest-resolution input image. This relaxes that by 2x
+
+    if ( 1.0 != expandCollageImages )
+    {
+        minDYEdge = (int) ( expandCollageImages * (float) minDYEdge );
+        minDXEdge = (int) ( expandCollageImages * (float) minDXEdge );
+        minEdge   = (int) ( expandCollageImages * (float) minEdge );
     }
 
     tracer.Trace( "GenerateCollage: minEdge %d minDXEdge %d, min DYEdge %d, all same aspect: %d\n", minEdge, minDXEdge, minDYEdge, allSameAspect );
@@ -2876,6 +2891,7 @@ void Usage( char * message = 0 )
     printf( "             -s:x              Clusters color groups and shows most common X colors, Default is 64, 1-256 valid.\n" );
     printf( "             -t                Enable debug tracing to ic.txt. Use -T to start with a fresh ic.txt\n" );
     printf( "             -w:x              Create a WAV file based on the image using methods 1..10. (prototype)\n" );
+    printf( "             -x:f              Expand the smallest source image in a collage by up to f times (1.0-10.0). Default is 1.0.\n" );
     printf( "             -zc:x             Colorization. Works like posterization (1-256), but maps to a built-in color table.\n" );
     printf( "             -zc:x,color1,...  Specify x colors that should be used. See example below.\n" );
     printf( "             -zc:x;filename    Use centroids from x color clusters taken from the input file.\n" );
@@ -3163,6 +3179,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     double tileProbability = 1.0;
     bool enableTracing = false;
     bool clearTraceFile = false;
+    double expandCollageImages = 1.0;
 
     ColorizationData cd;
 
@@ -3318,6 +3335,22 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
                 if ( waveMethod < 0 || waveMethod > 10 )
                 {
                     printf( "invalid wave method %d\n", waveMethod );
+                    Usage();
+                }
+            }
+            else if ( L'x' == p )
+            {
+                if ( ':' != parg[2] )
+                {
+                    printf( "colon expected with /x:f\n" );
+                    Usage();
+                }
+
+                expandCollageImages = _wtof( parg + 3 );
+
+                if ( expandCollageImages < 1.0 || expandCollageImages > 10.0 )
+                {
+                    printf( "value for /x:f must be in the range of 1.0 to 10.0, found %lf\n", expandCollageImages );
                     Usage();
                 }
             }
@@ -3532,7 +3565,7 @@ extern "C" int wmain( int argc, WCHAR * argv[] )
     {
         hr = GenerateCollage( collageMethod, awcInput, awcOutput, longEdge, posterizeLevel, colorizationData, makeGreyscale,
                               collageColumns, collageSpacing, collageSortByColor, collageSortByAspect, collageSpaced, aspectRatio, fillColor,
-                              outputMimetype, randomizeCollage, lowQualityOutput, highQualityScaling, namesAsCaptions );
+                              outputMimetype, randomizeCollage, lowQualityOutput, highQualityScaling, namesAsCaptions, expandCollageImages );
         if ( SUCCEEDED( hr ) )
             printf( "collage written successfully: %ws\n", awcOutput );
         else
