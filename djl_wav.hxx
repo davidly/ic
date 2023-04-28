@@ -67,6 +67,7 @@ class DjlParseWav
 
             struct WavInfochunk : WavChunkHeader
             {
+                // ISFT == Name of the software package used to create the file
                 // 49 4e 46 4f 49 53 46 54 0e 00 00 00 64 61 76 69 64 6c 79 2e 30 31 2e 30 31 00
                 // INFOISFT....davidly.01.01.
                 byte info[26] = { 0x49, 0x4e, 0x46, 0x4f, 0x49, 0x53, 0x46, 0x54, 0x0e, 0x00, 0x00, 0x00, 0x64,

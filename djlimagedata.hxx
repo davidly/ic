@@ -156,6 +156,8 @@ private:
     int g_ISO;
     int g_ExposureNum;
     int g_ExposureDen;
+    int g_FNumberNum;
+    int g_FNumberDen;
     int g_ApertureNum;
     int g_ApertureDen;
     int g_ExposureProgram;
@@ -965,12 +967,13 @@ private:
                     g_ExposureNum = 1;
                     g_ExposureDen = head.offset;
                 }
-                else if ( 33437 == head.id && 5 == head.type )
+                else if ( 33437 == head.id && 5 == head.type ) // FNumber
                 {
                     TwoDWORDs td;
                     GetTwoDWORDs( head.offset + headerBase, &td, littleEndian );
-                    g_ApertureNum = td.dw1;
-                    g_ApertureDen = td.dw2;
+
+                    g_FNumberNum = td.dw1;
+                    g_FNumberDen = td.dw2;
                 }
                 else if ( 34850 == head.id )
                     g_ExposureProgram = head.offset;
@@ -980,6 +983,14 @@ private:
                 {
                     __int64 stringOffset = ( head.count <= 4 ) ? ( IFDOffset - 4 ) : head.offset;
                     GetString( stringOffset + headerBase, g_acDateTimeOriginal, _countof( g_acDateTimeOriginal ), head.count );
+                }
+                else if ( 37378 == head.id && 5 == head.type ) // ApertureValue
+                {
+                    TwoDWORDs td;
+                    GetTwoDWORDs( head.offset + headerBase, &td, littleEndian );
+
+                    g_ApertureNum = td.dw1;
+                    g_ApertureDen = td.dw2;
                 }
                 else if ( 37386 == head.id && 5 == head.type )
                 {
@@ -2973,6 +2984,8 @@ private:
         g_ISO = -1;
         g_ExposureNum = -1;
         g_ExposureDen = -1;
+        g_FNumberNum = -1;
+        g_FNumberDen = -1;
         g_ApertureNum = -1;
         g_ApertureDen = -1;
         g_ExposureProgram = -1;
@@ -3236,8 +3249,18 @@ public:
                 current += sprintf_s( current, past - current, "%d/%d sec\n", g_ExposureNum, g_ExposureDen );
         }
     
-        if ( -1 != g_ApertureNum && -1 != g_ApertureDen && 0 != g_ApertureDen )
-            current += sprintf_s( current, past - current, "f / %.1lf\n", (double) g_ApertureNum / (double) g_ApertureDen );
+        if ( -1 != g_FNumberNum && -1 != g_FNumberDen && 0 != g_FNumberDen )
+        {
+            current += sprintf_s( current, past - current, "f / %.1lf\n", (double) g_FNumberNum / (double) g_FNumberDen );
+        }
+        else if ( -1 != g_ApertureNum && -1 != g_ApertureDen && 0 != g_ApertureDen )
+        {
+            // compute f number from aperture
+
+            double aperture = (double) g_ApertureNum / (double) g_ApertureDen;
+            double fnumber = pow( sqrt( 2.0 ), aperture );
+            current += sprintf_s( current, past - current, "f / %.1lf\n", fnumber );
+        }
     
         // Try to find both the focal length and effective focal length (if it's different / not full frame)
     

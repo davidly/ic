@@ -23,6 +23,8 @@
 
 using namespace std;
 
+#include <djl_common.hxx>
+
 // really doesn't matter except that it's slower
 //#define KMEANS_USE_SQRT
 
@@ -85,6 +87,7 @@ class KMeansCluster
         int clusterId;                   // 1-based ID.
         KMeansPoint centroid;            // not necessarily the same as any point in the cluster
         vector<double> scoreScratchpad;  // temporary area to avoid allocations when multi-threaded
+        double totalDistances;           // total distances of each point to the centroid. computed on-demand.
 
         // these pointers aren't owned by the vector; they're just pointers to items passed
         // to KMeans::run, so the lifetime of the values is up to the caller.
@@ -94,11 +97,15 @@ class KMeansCluster
         KMeansCluster( int id, KMeansPoint & cent ) :
             clusterId( id ),
             centroid( cent ),  // would like to remove this copy constructor usage
-            scoreScratchpad( cent.dimensionCount() ) // handy place to sum scores
+            scoreScratchpad( cent.dimensionCount() ), // handy place to sum scores
+            totalDistances( 0.0 )
         {
             assert( 0 != id );
             addPoint( cent );
-        }
+        } //KMeansCluster
+
+        double getTotalDistances() { return totalDistances; }
+        void setTotalDistances( double t ) { totalDistances = t; }
 
         static int compareClusters( const void * a, const void * b )
         {
@@ -176,6 +183,39 @@ class KMeans
             this->iters = iterations;
         } //KMeans
     
+        void runPointsToRGBCentroids( vector<KMeansPoint> & all_points, vector<DWORD> & centroids )
+        {
+            clusters.clear();
+            total_points = all_points.size();
+
+            for ( int i = 0; i < centroids.size(); i++ )
+            {
+                DWORD c = centroids[ i ];
+                KMeansPoint point( 0, ( c >> 16 ) & 0xff, ( c >> 8 ) & 0xff, c & 0xff );
+                clusters.emplace_back( i + 1, point );
+            }
+
+            // Add all points to their nearest cluster
+
+            //for ( int i = 0; i < total_points; i++ )
+            parallel_for ( 0, total_points, [&] ( int i )
+            {
+                int nearestClusterId = getNearestClusterId( all_points[ i ] );
+                all_points[ i ].setCluster( nearestClusterId ) ;
+            } );
+    
+            clearClusters();
+
+            for ( int i = 0; i < total_points; i++ )
+                clusters[ all_points[ i ].getCluster() - 1 ].addPoint( all_points[ i ] );
+        } //runPointsToRGBCentroids
+
+        void run( int k, vector<KMeansPoint> & all_points, int seed_iterations = 40 )
+        {
+            K = k;
+            run( all_points, seed_iterations );
+        } //run
+
         void run( vector<KMeansPoint> & all_points, int seed_iterations = 40 )
         {
             clusters.clear();
@@ -449,5 +489,86 @@ class KMeans
             for ( int i = 0; i < cluster.getSize(); i++ )
                 items[ i ] = cluster.getPoint( i ).getBGR();
         } //getCluserbgrItems
+
+        double getClusteringFit()
+        {
+            // returns the average distance between centroids divided by the
+            // average distance of each point to the center of its cluster.
+            // Higher numbers are better.
+
+            if ( 1 == K )
+                return 1000000.0;
+
+            // first find the average distance between clusters.
+
+            int countOfDistances = 0;
+            double totalDistanceBetweenClusters = 0.0;
+
+            for ( int i = 0; i < K; i++ )
+            {
+                KMeansCluster & clusterI = clusters[ i ];
+
+                for ( int j = i + 1; j < K; j++ )
+                {
+                    KMeansCluster & clusterJ = clusters[ j ];
+                    countOfDistances++;
+                    totalDistanceBetweenClusters += clusterI.getCentroid().distance( clusterJ.getCentroid() );
+                }
+            }
+
+            double avgDistanceBetweenClusters = totalDistanceBetweenClusters / countOfDistances;
+
+            // now find the average distance of each point to the center of its cluster
+
+            parallel_for( 0, K, [&] ( int i )
+            {
+                KMeansCluster & cluster = clusters[ i ];
+                KMeansPoint & centroid = cluster.getCentroid();
+                cluster.setTotalDistances( 0.0 );
+
+                for ( int i = 0; i < cluster.getSize(); i++ )
+                    cluster.setTotalDistances( cluster.getTotalDistances() +  centroid.distance( cluster.getPoint( i ) ) );
+             } );
+
+             double fit = 0.0;
+             int totalPoints = 0;
+             for ( int i = 0; i < K; i++ )
+             {
+                 KMeansCluster & cluster = clusters[ i ];
+                 fit += cluster.getTotalDistances();
+                 totalPoints += cluster.getSize();
+             }
+
+             fit /= (double) totalPoints;
+
+             printf( "distance between clusters %lf, fit %lf\n", avgDistanceBetweenClusters, fit );
+
+             return avgDistanceBetweenClusters / fit;
+        } //getClusteringFit
+
+        int run_n( vector<KMeansPoint> & all_points, int low, int high, int seed_iterations = 40 )
+        {
+            assert( low > 0 );
+            assert( high >= low );
+
+            int bestK = -1;
+            double bestFit = DBL_MIN;
+
+            for ( int i = low; i <= high; i++ )
+            {
+                run( i, all_points, seed_iterations );
+                double fit = getClusteringFit();
+
+                printf( "fitness at %d: %lf\n", i, fit );
+
+                if ( fit > bestFit )
+                {
+                    bestK = i;
+                    bestFit = fit;
+                }
+            }
+
+            return bestK;
+        } //run_n
 };
 
