@@ -663,6 +663,14 @@ class DjlParseWav
             {
                 float f = * (float *) ( data.get() + offset );
                 //tracer.Trace( "float read from file: %f\n", f );
+
+                // some files have floats that are out of range
+
+                if ( f > 1.0 )
+                    f = 1.0;
+                else if ( f < -1.0 )
+                    f = -1.0;
+
                 return (double) f;
             }
 
